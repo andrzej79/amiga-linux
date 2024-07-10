@@ -1,2 +1,2 @@
-# amiga_linux
+# amiga-linux
 Linux for the Amiga / Warp
