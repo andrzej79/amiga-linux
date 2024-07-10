@@ -1,0 +1,195 @@
+diff --git a/drivers/ata/Kconfig b/drivers/ata/Kconfig
+index 928ec93c6b45..4756ee4bd778 100644
+--- a/drivers/ata/Kconfig
++++ b/drivers/ata/Kconfig
+@@ -1025,6 +1025,18 @@ config PATA_GAYLE
+ 
+ 	  If unsure, say N.
+ 
++config PATA_CSWARP
++	tristate "Amiga CS Warp PATA support"
++	depends on M68K && AMIGA
++	help
++	  This option enables support for the on-board IDE
++	  interface on CS-Lab Warp Expansion Card
++	  (NOTE that idemode=native has to be set in Warp
++	  Configuration)
++
++	  If unsure, say N.
++
++
+ config PATA_BUDDHA
+ 	tristate "Buddha/Catweasel/X-Surf PATA support"
+ 	depends on ZORRO
+diff --git a/drivers/ata/Makefile b/drivers/ata/Makefile
+index 20e6645ab737..7b9b87ebacea 100644
+--- a/drivers/ata/Makefile
++++ b/drivers/ata/Makefile
+@@ -98,6 +98,7 @@ obj-$(CONFIG_PATA_WINBOND)	+= pata_sl82c105.o
+ obj-$(CONFIG_PATA_CMD640_PCI)	+= pata_cmd640.o
+ obj-$(CONFIG_PATA_FALCON)	+= pata_falcon.o
+ obj-$(CONFIG_PATA_GAYLE)	+= pata_gayle.o
++obj-$(CONFIG_PATA_CSWARP)	+= pata_cswarp.o
+ obj-$(CONFIG_PATA_BUDDHA)	+= pata_buddha.o
+ obj-$(CONFIG_PATA_ISAPNP)	+= pata_isapnp.o
+ obj-$(CONFIG_PATA_IXP4XX_CF)	+= pata_ixp4xx_cf.o
+diff --git a/drivers/input/mouse/amimouse.c b/drivers/input/mouse/amimouse.c
+index 2fbbaeb76d70..97488ba239ec 100644
+--- a/drivers/input/mouse/amimouse.c
++++ b/drivers/input/mouse/amimouse.c
+@@ -58,9 +58,9 @@ static irqreturn_t amimouse_interrupt(int irq, void *data)
+ 	input_report_rel(dev, REL_X, dx);
+ 	input_report_rel(dev, REL_Y, dy);
+ 
+-	input_report_key(dev, BTN_LEFT,   ciaa.pra & 0x40);
+-	input_report_key(dev, BTN_MIDDLE, potgor & 0x0100);
+-	input_report_key(dev, BTN_RIGHT,  potgor & 0x0400);
++	input_report_key(dev, BTN_LEFT,   !(ciaa.pra & 0x40));
++	input_report_key(dev, BTN_MIDDLE, !(potgor & 0x0100));
++	input_report_key(dev, BTN_RIGHT,  !(potgor & 0x0400));
+ 
+ 	input_sync(dev);
+ 
+diff --git a/drivers/net/ethernet/Kconfig b/drivers/net/ethernet/Kconfig
+index 6a19b5393ed1..c4e1a4faca87 100644
+--- a/drivers/net/ethernet/Kconfig
++++ b/drivers/net/ethernet/Kconfig
+@@ -190,4 +190,12 @@ source "drivers/net/ethernet/wiznet/Kconfig"
+ source "drivers/net/ethernet/xilinx/Kconfig"
+ source "drivers/net/ethernet/xircom/Kconfig"
+ 
++config AMIWARPNET
++	tristate "Amiga CSWarp Network support"
++	depends on AMIGA
++	select CRC32
++	help
++	  Amiga CS-Lab Warp Turbo Board network driver.
++	  If you don't have Warp board, say N.
++
+ endif # ETHERNET
+diff --git a/drivers/net/ethernet/Makefile b/drivers/net/ethernet/Makefile
+index 0d872d4efcd1..21accf90613f 100644
+--- a/drivers/net/ethernet/Makefile
++++ b/drivers/net/ethernet/Makefile
+@@ -104,3 +104,4 @@ obj-$(CONFIG_NET_VENDOR_XILINX) += xilinx/
+ obj-$(CONFIG_NET_VENDOR_XIRCOM) += xircom/
+ obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
+ obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
++obj-$(CONFIG_AMIWARPNET) += amiwarpnet.o
+\ No newline at end of file
+diff --git a/drivers/video/fbdev/Kconfig b/drivers/video/fbdev/Kconfig
+index 197b6d5268e9..b2bc5ca9a6e0 100644
+--- a/drivers/video/fbdev/Kconfig
++++ b/drivers/video/fbdev/Kconfig
+@@ -243,6 +243,15 @@ config FB_FM2
+ 	  This is the frame buffer device driver for the Amiga FrameMaster
+ 	  card from BSC (exhibited 1992 but not shipped as a CBM product).
+ 
++config FB_AMIGA_WARP
++	bool "Amiga CS-Lab Warp Video Support"
++	depends on AMIGA && (FB = y) && ZORRO
++	select FB_IOMEM_HELPERS 
++	select FB_SYSMEM_HELPERS
++	help
++	  This is the frame buffer device driver for the Amiga Warp Turbo card
++	  from CS-Lab s.c.
++
+ config FB_ARC
+ 	tristate "Arc Monochrome LCD board support"
+ 	depends on FB && (X86 || COMPILE_TEST)
+diff --git a/drivers/video/fbdev/Makefile b/drivers/video/fbdev/Makefile
+index 3eecd51267fa..bee9b72bfe44 100644
+--- a/drivers/video/fbdev/Makefile
++++ b/drivers/video/fbdev/Makefile
+@@ -13,6 +13,7 @@ obj-$(CONFIG_FB_WMT_GE_ROPS)   += wmt_ge_rops.o
+ 
+ # Hardware specific drivers go first
+ obj-$(CONFIG_FB_AMIGA)            += amifb.o c2p_planar.o
++obj-$(CONFIG_FB_AMIGA_WARP)       += amiwarpfb.o
+ obj-$(CONFIG_FB_ARC)              += arcfb.o
+ obj-$(CONFIG_FB_CLPS711X)	  += clps711x-fb.o
+ obj-$(CONFIG_FB_CYBER2000)        += cyber2000fb.o
+diff --git a/drivers/video/fbdev/amifb.c b/drivers/video/fbdev/amifb.c
+index 305f396c764c..270a2836d9ca 100644
+--- a/drivers/video/fbdev/amifb.c
++++ b/drivers/video/fbdev/amifb.c
+@@ -628,6 +628,7 @@ static u_long videomemory;
+ 	 */
+ 
+ static u_long min_fstrt = 192;
++static u_long default_depth = 4;
+ 
+ #define assignchunk(name, type, ptr, size) \
+ { \
+@@ -940,6 +941,7 @@ static struct fb_videomode ami_modedb[] __initdata = {
+ #define NUM_TOTAL_MODES  ARRAY_SIZE(ami_modedb)
+ 
+ static char *mode_option __initdata = NULL;
++
+ static int round_down_bpp = 1;	/* for mode probing */
+ 
+ 	/*
+@@ -2355,6 +2357,7 @@ static int __init amifb_setup(char *options)
+ 	while ((this_opt = strsep(&options, ",")) != NULL) {
+ 		if (!*this_opt)
+ 			continue;
++		printk("fboption: %s\n", this_opt);
+ 		if (!strcmp(this_opt, "inverse")) {
+ 			fb_invert_cmaps();
+ 		} else if (!strcmp(this_opt, "ilbm"))
+@@ -2363,8 +2366,12 @@ static int __init amifb_setup(char *options)
+ 			amifb_setup_mcap(this_opt + 11);
+ 		else if (!strncmp(this_opt, "fstart:", 7))
+ 			min_fstrt = simple_strtoul(this_opt + 7, NULL, 0);
+-		else
++		else if (!strncmp(this_opt, "depth:", 6))
++			default_depth = simple_strtoul(this_opt + 6, NULL, 0);
++		else {
+ 			mode_option = this_opt;
++			printk("fboption: setting display mode: %s\n", this_opt);
++		}
+ 	}
+ 
+ 	if (min_fstrt < 48)
+@@ -3665,7 +3672,7 @@ static int __init amifb_probe(struct platform_device *pdev)
+ 	info->device = &pdev->dev;
+ 
+ 	if (!fb_find_mode(&info->var, info, mode_option, ami_modedb,
+-			  NUM_TOTAL_MODES, &ami_modedb[defmode], 4)) {
++			  NUM_TOTAL_MODES, &ami_modedb[defmode], default_depth)) {
+ 		err = -EINVAL;
+ 		goto release;
+ 	}
+diff --git a/drivers/zorro/zorro.ids b/drivers/zorro/zorro.ids
+index 119abea8c6cb..33418af7488a 100644
+--- a/drivers/zorro/zorro.ids
++++ b/drivers/zorro/zorro.ids
+@@ -400,6 +400,11 @@
+ 	0100  ISDN Blaster Z2 [ISDN Interface]
+ 	0200  HyperCom 4 [Multi I/O]
+ 	0600  HyperCom 4+ [Multi I/O]
++1400 CSLab
++	6000  Warp DDR3 Memory
++	0001  Warp Video Memory
++	0101  Warp Control Registers
++	0201  Warp Flash ROM
+ 157c  Information
+ 	6400  ISDN Engine I [ISDN Interface]
+ 2017  Vortex
+diff --git a/include/uapi/linux/zorro_ids.h b/include/uapi/linux/zorro_ids.h
+index 6e574d7b7d79..e293ff594060 100644
+--- a/include/uapi/linux/zorro_ids.h
++++ b/include/uapi/linux/zorro_ids.h
+@@ -449,6 +449,12 @@
+ #define  ZORRO_PROD_VMC_ISDN_BLASTER_Z2				ZORRO_ID(VMC, 0x01, 0)
+ #define  ZORRO_PROD_VMC_HYPERCOM_4				ZORRO_ID(VMC, 0x02, 0)
+ 
++#define ZORRO_MANUF_CSLAB                   0x1400
++#define ZORRO_PROD_CSLAB_WARP_DDR3          ZORRO_ID(CSLAB, 0x3c, 0)
++#define ZORRO_PROD_CSLAB_WARP_VRAM          ZORRO_ID(CSLAB, 0x64, 0)
++#define ZORRO_PROD_CSLAB_WARP_CTRL          ZORRO_ID(CSLAB, 0x65, 0)
++#define ZORRO_PROD_CSLAB_WARP_XROM          ZORRO_ID(CSLAB, 0x66, 0)
++
+ #define ZORRO_MANUF_INFORMATION					0x157C
+ #define  ZORRO_PROD_INFORMATION_ISDN_ENGINE_I			ZORRO_ID(INFORMATION, 0x64, 0)
+ 

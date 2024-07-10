@@ -1,0 +1,17 @@
+diff --git a/src/util.h b/src/util.h
+index 35c1afd..b6894c6 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -102,9 +102,9 @@ extern struct timeval _mysleep;
+ #ifdef LIBVNCSERVER_HAVE_LIBPTHREAD
+ extern MUTEX(x11Mutex);
+ extern MUTEX(scrollMutex);
+-MUTEX(clientMutex);
+-MUTEX(inputMutex);
+-MUTEX(pointerMutex);
++static MUTEX(clientMutex);
++static MUTEX(inputMutex);
++static MUTEX(pointerMutex);
+ #endif
+ 
+ #define X_INIT INIT_MUTEX(x11Mutex)

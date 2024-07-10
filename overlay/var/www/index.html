@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hosted on Amiga</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: black;
+            overflow: hidden;
+            position: relative;
+        }
+        h1 {
+            color: white;
+            position: absolute;
+            top: 20px;
+            text-align: center;
+            width: 100%;
+        }
+        h2 {
+            color: gray;
+            position: absolute;
+            top: 60px;
+            text-align: center;
+            width: 100%;
+        }
+        #boing-ball {
+            position: absolute;
+            width: 150px;
+            height: 150px;
+            background: url('ball_texture.gif') no-repeat center center;
+            background-size: contain;
+            border-radius: 50%;  /* This makes the ball circular */
+            /* box-shadow: inset -10px -10px 0 rgba(0, 0, 0, 0.2); */  /* This adds a shadow */
+        }
+    </style>
+</head>
+<body>
+    <h1>This page is hosted on Amiga Warp1260</h1>
+    <h2>lighthttpd, linux kernel 6.9, MC68060 105MHz</h2>
+    <div id="boing-ball"></div>
+    <script>
+        const ball = document.getElementById('boing-ball');
+        let x = 0;
+        let y = 0;
+        let dx = 2;
+        let dy = 2;
+        const ballWidth = ball.offsetWidth;
+        const ballHeight = ball.offsetHeight;
+        
+        function animate() {
+            const windowWidth = window.innerWidth;
+            const windowHeight = window.innerHeight;
+            
+            x += dx;
+            y += dy;
+            
+            if (x + ballWidth >= windowWidth || x <= 0) {
+                dx *= -1;
+            }
+            if (y + ballHeight >= windowHeight || y <= 0) {
+                dy *= -1;
+            }
+            
+            ball.style.left = x + 'px';
+            ball.style.top = y + 'px';
+            
+            requestAnimationFrame(animate);
+        }
+        
+        animate();
+    </script>
+</body>
+</html>
