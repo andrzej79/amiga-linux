@@ -36,6 +36,7 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
   - LINUX: `LNX\0` ext4 root for the rest (`sda4`), built with `fakeroot` and `mke2fs -d` from `rootfs.tar` plus the modules, with a swap line added to fstab.
 - FFS images must be created with the partition's exact CHS (`xdftool create chs=…`), otherwise `rdbtool import` rejects the size mismatch. The RDB and `xdftool` both assume 2 reserved blocks.
 - Output: `output/cfcard/warp-cf-<sectors>.img.gz` and a `.info` file next to it.
+- `cfcard/save-dh0.sh [--part NAME] diskN` (host, sudo, read-only) parses the card's RDB, copies that partition's cylinders and saves them as `output/cfcard/dh0.hdf.gz`, plus a dated copy. The next image then puts this saved AmigaOS partition back in DH0 instead of an empty volume (`DH0_IMAGE`, default that file; `none` = empty). Its size must equal the layout's DH0 exactly. The saved partition contains AmigaOS files and must stay in the git-ignored `output/`. Never `dd` a fixed count from a pipe: short reads truncate it; read from the raw device or use `head -c`.
 
 ## How the pieces map onto upstream trees
 

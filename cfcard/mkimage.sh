@@ -3,7 +3,8 @@
 # Runs inside the build container (./build.sh cfimage); see cfcard/make-cf.sh.
 #
 # Layout (Linux names assume the card is the first disk on the Warp IDE):
-#   DH0    FFS DOS\3, bootable, empty "System"        -> sda1  (install AmigaOS here)
+#   DH0    FFS DOS\3, bootable, "System": empty, or the
+#          AmigaOS partition saved by save-dh0.sh       -> sda1
 #   LBOOT  FFS DOS\3, amiboot + vmlinux + boot scripts -> sda2
 #   SWAP   SWP\0 (0x53575000), Linux swap              -> sda3
 #   LINUX  LNX\0 (0x4C4E5800), ext4 root, rest of card -> sda4
@@ -15,6 +16,8 @@
 #   SWAP_MB     default 512
 #   ROOT_DISK   Linux disk name in the boot scripts, default sda
 #   VIDEO       amiwarpfb mode for the boot script, default 1280x1024@60,depth:16
+#   DH0_IMAGE   saved DH0 (cfcard/save-dh0.sh), default output/cfcard/dh0.hdf.gz
+#               if it exists; "none" = empty FFS volume
 set -euo pipefail
 
 REPO=/repo
@@ -32,6 +35,8 @@ SWAP_MB=${SWAP_MB:-512}
 ROOT_DISK=${ROOT_DISK:-sda}
 # 1280x1024@60 (108 MHz): no pixel-clock harmonic in the 2.4 GHz WiFi band
 VIDEO=${VIDEO:-1280x1024@60,depth:16}
+DH0_IMAGE=${DH0_IMAGE:-$REPO/output/cfcard/dh0.hdf.gz}
+case "$DH0_IMAGE" in /*|none) ;; *) DH0_IMAGE=$REPO/$DH0_IMAGE ;; esac
 BR_CONFIG=${BR_CONFIG:-buildroot_2024.05/buildroot_cfg_20240705}
 
 ROOTFS_TAR=$REPO/output/$(basename "$BR_CONFIG")/rootfs.tar
@@ -74,8 +79,19 @@ rm -rf "$W"
 mkdir -p "$W" "$OUT"
 
 # ---------------------------------------------------------------- DH0
-log "DH0: empty FFS volume 'System'"
-xdftool -f "$W/dh0.hdf" create chs=$((DH0_HI - DH0_LO + 1)),$HEADS,$SECS + format System ffs+intl
+# A saved AmigaOS partition (cfcard/save-dh0.sh) goes back as it was; it must
+# have exactly the size of this layout's DH0.  DH0_IMAGE=none: empty volume.
+if [ "$DH0_IMAGE" != none ] && [ -f "$DH0_IMAGE" ]; then
+    log "DH0: saved partition ${DH0_IMAGE#$REPO/}"
+    gzip -dc "$DH0_IMAGE" > "$W/dh0.hdf"
+    got=$(stat -c %s "$W/dh0.hdf")
+    [ "$got" -eq "$DH0_BYTES" ] ||
+        die "saved DH0 is $got bytes, this layout's DH0 is $DH0_BYTES (set DH0_MB to match, or DH0_IMAGE=none)"
+    xdftool "$W/dh0.hdf" open chs=$((DH0_HI - DH0_LO + 1)),$HEADS,$SECS + info | head -3
+else
+    log "DH0: empty FFS volume 'System'"
+    xdftool -f "$W/dh0.hdf" create chs=$((DH0_HI - DH0_LO + 1)),$HEADS,$SECS + format System ffs+intl
+fi
 
 # ---------------------------------------------------------------- LBOOT
 log "LBOOT: amiboot, kernel, boot scripts"

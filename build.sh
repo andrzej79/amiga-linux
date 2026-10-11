@@ -31,7 +31,7 @@ Usage: ./build.sh <command>
 Environment:
   BR_CONFIG   Buildroot config to use (default: $DEFAULT_BR_CONFIG)
   JOBS        parallel jobs for the kernel build (default: all CPUs)
-  CF_BLOCKS, DH0_MB, LBOOT_MB, SWAP_MB, ROOT_DISK, VIDEO   see cfcard/mkimage.sh
+  CF_BLOCKS, DH0_MB, LBOOT_MB, SWAP_MB, ROOT_DISK, VIDEO, DH0_IMAGE   see cfcard/mkimage.sh
 
 The kernel is built with the m68k toolchain of the selected Buildroot config.
 EOF
@@ -52,7 +52,7 @@ if [ -z "${AMIGA_IN_CONTAINER:-}" ]; then
     exec docker run --rm ${tty[@]+"${tty[@]}"} \
         -v "$VOLUME:/work" -v "$repo:/repo" \
         -e AMIGA_IN_CONTAINER=1 -e BR_CONFIG -e JOBS \
-        -e CF_BLOCKS -e DH0_MB -e LBOOT_MB -e SWAP_MB -e ROOT_DISK -e VIDEO \
+        -e CF_BLOCKS -e DH0_MB -e LBOOT_MB -e SWAP_MB -e ROOT_DISK -e VIDEO -e DH0_IMAGE \
         "$IMAGE" /repo/build.sh "$@"
 fi
 

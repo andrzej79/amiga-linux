@@ -85,6 +85,7 @@ read -r -p "Type the disk identifier ($id) to continue: " answer
 [ "$answer" = "$id" ] || die "not confirmed, nothing written"
 
 # ---- write
+sudo -v || die "sudo failed - run this script from a Terminal window so it can ask for the password"
 diskutil unmountDisk "/dev/$id" >/dev/null || die "cannot unmount /dev/$id"
 progress=""
 if dd if=/dev/zero of=/dev/null count=1 status=progress 2>/dev/null; then
