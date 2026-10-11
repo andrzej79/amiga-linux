@@ -37,7 +37,7 @@
 #include "amiwarp_vidclk.h"
 
 #define DRV_NAME	"amiwarpfb"
-#define DEF_MODE	1	/* 800x600@60 */
+#define DEF_MODE	4	/* 1280x1024@60: 108 MHz, no harmonic in the 2.4 GHz WiFi band */
 #define DEF_DEPTH	16
 
 #define WARP_MAX_XRES		1920
@@ -84,9 +84,11 @@ struct warpfb_par {
 static const struct fb_videomode warpfb_modedb[] = {
 	{ "640x480@60", 60, 640, 480, 39722, 48, 16, 33, 10, 96, 2,
 	  0, FB_VMODE_NONINTERLACED },
-	{ "800x600@60", 60, 800, 600, 25000, 88, 40, 23, 1, 128, 4,
+	/* 40.4167 MHz, not 40.000: 60 x 40 MHz = 2400 MHz sits on WiFi channel 1 (as csgfx) */
+	{ "800x600@60", 60, 800, 600, 24742, 88, 40, 23, 1, 128, 4,
 	  FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED },
-	{ "1024x768@60", 60, 1024, 768, 15385, 160, 24, 29, 3, 136, 6,
+	/* 64.375 MHz, not 65.000: 37 x 65 MHz = 2405 MHz sits on WiFi channel 1 (as csgfx) */
+	{ "1024x768@60", 60, 1024, 768, 15534, 160, 24, 29, 3, 136, 6,
 	  0, FB_VMODE_NONINTERLACED },
 	{ "1280x720@60", 60, 1280, 720, 13468, 220, 110, 20, 5, 40, 5,
 	  FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED },
@@ -159,6 +161,49 @@ static int warpfb_wait_blitter(struct warpfb_par *par)
 		dev_err(par->dev, "blitter stuck busy (BLT_SR 0x%08x)\n", rd(par, WARP_BLT_SR));
 	}
 	return -ETIMEDOUT;
+}
+
+/* ------------------------------------------------------------------------ */
+/* WiFi interference check                                                  */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * The video clocks radiate: a pixel-clock harmonic inside the WiFi channel the
+ * board's ESP32 uses costs frames on the air, and the module's block-ack
+ * reorder buffer then holds everything behind a lost frame - pings of
+ * hundreds of ms in bursts.  Seen with 1024x768@60 (65 MHz * 37 = 2405 MHz) on
+ * channel 1, hence the slightly off-spec 800x600/1024x768 clocks in the mode
+ * table, the same ones the AmigaOS driver's Picasso96 settings use.  108 MHz (1280x1024@60, also the scandoubler) and 148.5 MHz
+ * (1920x1080@60) keep every harmonic out of 2401..2483 MHz.
+ */
+static void warpfb_check_wifi(struct warpfb_par *par, u32 pixclk_hz)
+{
+	u8 ch = par->wc->wifi_channel;
+	u32 f = pixclk_hz / 1000, lo, hi, h;	/* kHz */
+
+	if (!f)
+		return;
+	if (ch >= 1 && ch <= 13) {
+		lo = (2407 + 5 * ch - 11) * 1000;
+		hi = (2407 + 5 * ch + 11) * 1000;
+	} else if (ch == 14) {
+		lo = 2473000;
+		hi = 2495000;
+	} else {
+		lo = 2401000;
+		hi = 2483000;
+	}
+	h = DIV_ROUND_UP(lo, f) * f;	/* first harmonic at or above lo */
+	if (h > hi)
+		return;
+	if (ch)
+		dev_warn(par->dev,
+			 "pixel clock %u.%03u MHz: harmonic %u x = %u MHz falls into WiFi channel %u - expect WiFi packet loss and latency; 1280x1024@60 or 1920x1080@60 avoid it\n",
+			 f / 1000, f % 1000, h / f, h / 1000, ch);
+	else
+		dev_info(par->dev,
+			 "pixel clock %u.%03u MHz: harmonic %u x = %u MHz is inside the 2.4 GHz WiFi band; if WiFi is slow, use 1280x1024@60 or 1920x1080@60\n",
+			 f / 1000, f % 1000, h / f, h / 1000);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -305,6 +350,7 @@ static int warpfb_set_par(struct fb_info *info)
 	}
 	par->clk_ok = true;
 	par->cur_pixclk_hz = achieved;
+	warpfb_check_wifi(par, achieved);
 
 	/* 2. fetch (MCLK domain): no divided modes */
 	wr(par, 0, WARP_DIV_Y_CR);

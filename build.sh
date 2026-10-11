@@ -22,6 +22,8 @@ Usage: ./build.sh <command>
   kernel              build the kernel            -> output/kernel/
   rootfs-menuconfig   Buildroot menuconfig, saved back to the repo config
   kernel-menuconfig   kernel menuconfig, saved back to $KERNEL_CONFIG
+  cfimage             CF card image from the built rootfs + kernel (needs CF_BLOCKS;
+                      normally run through cfcard/make-cf.sh)  -> output/cfcard/
   shell               interactive shell in the build container
   image               (re)build the container image
   clean               delete the work volume (sources, build trees, downloads)
@@ -29,6 +31,7 @@ Usage: ./build.sh <command>
 Environment:
   BR_CONFIG   Buildroot config to use (default: $DEFAULT_BR_CONFIG)
   JOBS        parallel jobs for the kernel build (default: all CPUs)
+  CF_BLOCKS, DH0_MB, LBOOT_MB, SWAP_MB, ROOT_DISK, VIDEO   see cfcard/mkimage.sh
 
 The kernel is built with the m68k toolchain of the selected Buildroot config.
 EOF
@@ -49,6 +52,7 @@ if [ -z "${AMIGA_IN_CONTAINER:-}" ]; then
     exec docker run --rm ${tty[@]+"${tty[@]}"} \
         -v "$VOLUME:/work" -v "$repo:/repo" \
         -e AMIGA_IN_CONTAINER=1 -e BR_CONFIG -e JOBS \
+        -e CF_BLOCKS -e DH0_MB -e LBOOT_MB -e SWAP_MB -e ROOT_DISK -e VIDEO \
         "$IMAGE" /repo/build.sh "$@"
 fi
 
@@ -181,6 +185,7 @@ case "${1:-all}" in
         kernel_make menuconfig
         cp "$K_OUT/.config" "$REPO/$KERNEL_CONFIG"
         log "Saved to $KERNEL_CONFIG" ;;
+    cfimage) exec bash "$REPO/cfcard/mkimage.sh" ;;
     shell) exec bash ;;
     *) usage; exit 1 ;;
 esac

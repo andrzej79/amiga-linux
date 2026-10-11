@@ -7,7 +7,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         diffutils file findutils flex g++ gawk git gzip kmod libelf-dev \
         libncurses-dev libssl-dev locales make patch perl pkg-config python3 \
         rsync sed tar unzip wget xz-utils zstd \
+        dropbear-bin e2fsprogs fakeroot python3-venv util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+# amitools (rdbtool, xdftool) for the CF card image: Amiga RDB + FFS
+RUN python3 -m venv /opt/amitools \
+    && /opt/amitools/bin/pip install --no-cache-dir amitools==0.8.1
+ENV PATH=/opt/amitools/bin:$PATH
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 

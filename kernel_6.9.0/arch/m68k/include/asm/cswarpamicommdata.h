@@ -83,6 +83,16 @@
 #define WARP_FMW_VER_DEVBUILD		WARP_FMW_VER(0, 9, 0)	/* no bootloader: accept */
 #define WARP_FMW_VER_MIN_ETHIF		WARP_FMW_VER(2, 2, 0x67)
 #define WARP_FMW_VER_MIN_ASYNC		WARP_FMW_VER(2, 3, 0x00)
+#define WARP_FMW_VER_MIN_NETTLM		WARP_FMW_VER(2, 2, 0x88)
+
+/*
+ * dpcmdGetNetTelemetry: request { header, u32 flags }, reply { header, then
+ * NETTLM_WORDS u32 words } - schema version NETTLM_VERSION, all fields 32 bit
+ * (see DprNetTelemetry in WarpAmiCommData.h for the names and order).
+ */
+#define NETTLM_VERSION			8
+#define NETTLM_FLAG_RESET		BIT(0)
+#define NETTLM_WORDS			103
 #define WARP_FMW_VER_MIN_LINUX		WARP_FMW_VER(3, 0, 0x00)	/* release 3.000 */
 
 /* Commands (68k -> ARM), DprCmd */
@@ -95,6 +105,7 @@ enum {
 	dpcmdEthIfTransmit		= 47,	/* no reply */
 	dpcmdEthIfReceive		= 48,	/* reply dprplEthIfReceive */
 	dpcmdEthIfGetInfo		= 49,	/* reply dprplEthIfInfo */
+	dpcmdGetNetTelemetry		= 54,	/* reply dprplNetTelemetry, fw >= 22.88 */
 };
 
 /* Replies (ARM -> 68k), DprRpl */
@@ -105,6 +116,7 @@ enum {
 	dprplEthMACAddr			= 11,
 	dprplEthIfReceive		= 23,
 	dprplEthIfInfo			= 24,
+	dprplNetTelemetry		= 28,
 };
 
 #pragma pack(push, 2)

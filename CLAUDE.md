@@ -23,6 +23,20 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
 - The kernel is compiled with the **Buildroot toolchain** of the selected config (`make toolchain` runs if needed), not with a distro cross-gcc. Buildroot's GCC defaults to `-mcpu=68040`, so `kernel_make` passes `KCFLAGS/KAFLAGS=-m68020` whenever the kernel config enables 68020/68030. Without it, the 030 MMU inline asm (`pmove %psr`, `ptestr`, `ploadr`) fails to assemble. Kernel builds are out-of-tree (`O=/work/linux-build`). The pristine `linux-6.9` tree is re-extracted and re-patched whenever `sellen_mods_and_fixes.patch` changes.
 - The repo configs are copied in and run through `olddefconfig` on every build. They are only written back by the `*-menuconfig` commands.
 
+### CF card (`cfcard/`)
+- `cfcard/make-cf.sh [--image-only] [--verify] diskN` runs on the macOS host:
+  - Its safety checks refuse internal, non-whole, non-removable, boot, APFS-store and >256 GB disks.
+  - It builds an image for the card's exact sector count (`CF_BLOCKS=… ./build.sh cfimage`).
+  - It asks you to type the disk ID, then writes the image with `gzip -dc | sudo dd`. Never run the write without the user's explicit go-ahead; `--image-only` is safe.
+- `cfcard/mkimage.sh` runs in the container and creates:
+  - an RDB (amitools `rdbtool`) with CHS geometry n/16/63 and 2 RDB cylinders;
+  - DH0: FFS DOS\3, 1 GiB, bootable, empty "System" (`sda1`);
+  - LBOOT: FFS, 64 MiB (`sda2`), holding `amiboot-5.6`, `vmlinux`, and the `Linux`/`Linux-debug` AmigaDOS scripts;
+  - SWAP: `SWP\0`, 512 MiB (`sda3`), with a big-endian swap header written in Python (bookworm's `mkswap` cannot write big-endian);
+  - LINUX: `LNX\0` ext4 root for the rest (`sda4`), built with `fakeroot` and `mke2fs -d` from `rootfs.tar` plus the modules, with a swap line added to fstab.
+- FFS images must be created with the partition's exact CHS (`xdftool create chs=…`), otherwise `rdbtool import` rejects the size mismatch. The RDB and `xdftool` both assume 2 reserved blocks.
+- Output: `output/cfcard/warp-cf-<sectors>.img.gz` and a `.info` file next to it.
+
 ## How the pieces map onto upstream trees
 
 ### Kernel (`kernel_6.9.0/`)
@@ -47,6 +61,7 @@ The drivers target Warp firmware package **3.000+** (the state before this rewor
   - the `cswarp_dbg()` macro, driven by the `cswarp_core.dbg` bitmask.
 
   After an exchange times out, the core marks the frame broken: a late reply from the ARM must never land in the next caller's frame.
+- **Diagnostics in sysfs:** the core's `stats` file (exchange time average/maximum, sleeps; writing resets), and on the `cswarp-net` device `latency` (doorbell→drain, TX queue→board, frames found by doorbell vs timer) and `board_telemetry` (`dpcmdGetNetTelemetry`: the ARM-side queue, doorbell, command and ESP32 radio counters; writing resets the board's counters).
 - **`amiwarpnet.c`** registers two netdevs (`eth%d`): if 0 = WiFi, if 1 = USB ethernet. All board access runs on one ordered workqueue, because exchanges sleep while `ndo_start_xmit` cannot:
   - TX frames are queued per interface and sent round-robin;
   - the RX doorbells (`AUNIT_ETH0/1`) trigger a drain with `dpcmdEthIfReceive(ETH_IF_ANY)`;
@@ -59,6 +74,7 @@ The drivers target Warp firmware package **3.000+** (the state before this rewor
   - **Blitter addresses** are VRAM *physical* addresses: the hardware uses bits 24:4.
   - **Sync polarity** comes from `var->sync`.
   - On remove/shutdown it restores the native 108.125 MHz scandoubler output.
+  - **WiFi interference:** pixel-clock harmonics radiate into the board's 2.4 GHz WiFi (ESP32). A harmonic inside the WiFi channel causes lost frames, and the ESP32's block-ack reorder buffer then turns those losses into 0.2–1 s ping stalls. For that reason, 800x600 (40.4167 MHz) and 1024x768 (64.375 MHz) deliberately use off-spec clocks, the same ones as the AmigaOS Picasso96 settings (`csWarpAmigaSoftware/AmigaRTGMonitors/Picasso96Settings_warpGFX`); don't "fix" them back to VESA values. `warpfb_check_wifi()` warns when a mode's harmonic hits the WiFi channel reported by the diag reply (`wc->wifi_channel`). The default mode is 1280x1024@60 (108 MHz, clear of the band).
 - **`amiwarp_vidclk.c`** is a bit-exact port of `csWarpAmigaSoftware/common/mmcm_drp.c` + `vidclk_hw.c`. Keep it in sync with them: if those change, re-port and compare outputs over the whole clock range.
 - **Register access:** Warp registers are big-endian 32-bit words. Use `z_readl`/`z_writel`; `readl`/`writel` are little-endian on m68k.
 - **Headers:** `asm/cswarpdefs.h` (register offsets) and `asm/cswarpamicommdata.h` (the protocol subset) mirror `csWarpAmigaSoftware/common/WarpDefs.h`, `WarpRegisters.h` and `WarpAmiCommData.h`. They are a wire contract: enum values are explicit, structs use `#pragma pack(2)`, and `cswarp-core.c` `static_assert`s the offsets.

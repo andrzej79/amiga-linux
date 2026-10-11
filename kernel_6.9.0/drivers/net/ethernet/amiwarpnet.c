@@ -21,12 +21,15 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/jiffies.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
 #include <linux/kernel.h>
 #include <linux/mfd/cswarp.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/platform_device.h>
 #include <linux/rtnetlink.h>
+#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 
@@ -41,7 +44,25 @@
 #define RX_POLL_MS		200	/* fallback for a missed doorbell */
 #define LINK_POLL_MS		1000
 
-#define NET_RX_PENDING		0
+#define NET_RX_PENDING		0	/* drain wanted (doorbell or timer) */
+#define NET_RX_DB		1	/* ... and a doorbell asked for it, at db_time */
+
+/* latency accumulator, microseconds */
+struct warpnet_lat {
+	u64 total;
+	u32 max;
+	unsigned long n;
+};
+
+static void lat_add(struct warpnet_lat *l, s64 us)
+{
+	if (us < 0)
+		us = 0;
+	l->total += us;
+	if (us > l->max)
+		l->max = us;
+	l->n++;
+}
 
 struct warpnet;
 
@@ -71,6 +92,13 @@ struct warpnet {
 	/* counters for the dbg dump on close */
 	unsigned long rx_drops_down;
 	unsigned long rx_bad;
+	/* latency diagnostics (sysfs "latency") */
+	ktime_t db_time;
+	struct warpnet_lat lat_db;	/* RX doorbell irq -> drain starts */
+	struct warpnet_lat lat_tx;	/* ndo_start_xmit -> frame taken by the board */
+	unsigned long rx_frames_db;	/* frames found by doorbell-triggered drains */
+	unsigned long rx_frames_timer;	/* frames found by the fallback timer */
+	unsigned long io_runs;
 };
 
 static const char *const if_names[ETH_IF_COUNT] = { "WiFi", "USB-ethernet" };
@@ -111,6 +139,7 @@ static void warpnet_tx_one(struct warpnet_if *nif, struct sk_buff *skb)
 	z_memcpy_toio(frame + offsetof(DprCmdEthIfSend, packet), skb->data, len);
 	err = cswarp_frame_exchange(wn->wc, false, CSWARP_RPL_ANY);
 	cswarp_frame_unlock(wn->wc);
+	lat_add(&wn->lat_tx, ktime_us_delta(ktime_get(), *(ktime_t *)skb->cb));
 
 	if (err) {
 		ndev->stats.tx_errors++;
@@ -206,6 +235,7 @@ static void warpnet_io_work(struct work_struct *work)
 	struct warpnet *wn = container_of(work, struct warpnet, io_work);
 	int round;
 
+	wn->io_runs++;
 	for (round = 0; round < IO_ROUNDS; round++) {
 		int did = 0, i;
 
@@ -230,7 +260,16 @@ static void warpnet_io_work(struct work_struct *work)
 		}
 
 		if (test_and_clear_bit(NET_RX_PENDING, &wn->flags)) {
-			int n = warpnet_rx_drain(wn);
+			bool db = test_and_clear_bit(NET_RX_DB, &wn->flags);
+			int n;
+
+			if (db)
+				lat_add(&wn->lat_db, ktime_us_delta(ktime_get(), wn->db_time));
+			n = warpnet_rx_drain(wn);
+			if (db)
+				wn->rx_frames_db += n;
+			else
+				wn->rx_frames_timer += n;
 
 			if (n == RX_BURST)
 				set_bit(NET_RX_PENDING, &wn->flags);
@@ -309,6 +348,8 @@ static void warpnet_doorbell(void *ctx)
 {
 	struct warpnet *wn = ctx;
 
+	if (!test_and_set_bit(NET_RX_DB, &wn->flags))
+		wn->db_time = ktime_get();
 	set_bit(NET_RX_PENDING, &wn->flags);
 	queue_work(wn->wq, &wn->io_work);
 }
@@ -403,6 +444,7 @@ static netdev_tx_t warpnet_start_xmit(struct sk_buff *skb, struct net_device *nd
 		return NETDEV_TX_OK;
 	}
 
+	*(ktime_t *)skb->cb = ktime_get();
 	skb_queue_tail(&nif->txq, skb);
 	if (skb_queue_len(&nif->txq) >= TXQ_STOP_LEN) {
 		cswarp_dbg(CSWARP_DBG_NET, &ndev->dev, "TX queue full (%u), stopped\n",
@@ -577,6 +619,132 @@ static void warpnet_remove_ifs(struct warpnet *wn)
 	}
 }
 
+/* ------------------------------------------------------------------------ */
+/* sysfs: latency diagnostics                                               */
+/* ------------------------------------------------------------------------ */
+
+static ssize_t latency_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct warpnet *wn = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf,
+			  "rx_doorbell_to_drain_us avg %llu max %u n %lu\n"
+			  "tx_queue_to_board_us avg %llu max %u n %lu\n"
+			  "rx_frames_by_doorbell %lu\nrx_frames_by_timer %lu\nio_work_runs %lu\n",
+			  wn->lat_db.n ? div_u64(wn->lat_db.total, wn->lat_db.n) : 0ULL,
+			  wn->lat_db.max, wn->lat_db.n,
+			  wn->lat_tx.n ? div_u64(wn->lat_tx.total, wn->lat_tx.n) : 0ULL,
+			  wn->lat_tx.max, wn->lat_tx.n,
+			  wn->rx_frames_db, wn->rx_frames_timer, wn->io_runs);
+}
+
+static ssize_t latency_store(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
+{
+	struct warpnet *wn = dev_get_drvdata(dev);
+
+	/* any write resets */
+	memset(&wn->lat_db, 0, sizeof(wn->lat_db));
+	memset(&wn->lat_tx, 0, sizeof(wn->lat_tx));
+	wn->rx_frames_db = 0;
+	wn->rx_frames_timer = 0;
+	wn->io_runs = 0;
+	return count;
+}
+static DEVICE_ATTR_RW(latency);
+
+/*
+ * Board-side network telemetry (dpcmdGetNetTelemetry), named after
+ * DprNetTelemetry, schema version 8: 16 header words, 2 x 8 interface words,
+ * 49 ASIX words (skipped), 2 x 7 command timing words, 8 ESP words.
+ */
+#define TLM_IFACE	16
+#define TLM_CMDTX	(TLM_IFACE + 2 * 8 + 49)
+#define TLM_CMDRX	(TLM_CMDTX + 7)
+#define TLM_ESP		(TLM_CMDRX + 7)
+
+static int warpnet_fetch_tlm(struct warpnet *wn, u32 flags, u32 *w)
+{
+	struct {
+		DprCmdHeader header;
+		u32 flags;
+	} __packed cmd = { .header.cmd = dpcmdGetNetTelemetry, .flags = flags };
+	u32 rpl[1 + NETTLM_WORDS];
+	int err;
+
+	if (!cswarp_fw_at_least(wn->wc, WARP_FMW_VER_MIN_NETTLM))
+		return -EOPNOTSUPP;
+	err = cswarp_xfer(wn->wc, &cmd, sizeof(cmd), rpl, sizeof(rpl), dprplNetTelemetry);
+	if (!err)
+		memcpy(w, &rpl[1], NETTLM_WORDS * 4);
+	return err;
+}
+
+static int tlm_emit_cmd(char *buf, int len, const char *name, const u32 *c)
+{
+	u32 n = c[0] ? c[0] : 1;
+
+	return sysfs_emit_at(buf, len,
+			     "%s: count %u  turn avg %u max %u  wait avg %u max %u  serve avg %u max %u (us)\n",
+			     name, c[0], c[1] / n, c[2], c[3] / n, c[4], c[5] / n, c[6]);
+}
+
+static ssize_t board_telemetry_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct warpnet *wn = dev_get_drvdata(dev);
+	u32 *w;
+	int err, len, i;
+
+	w = kmalloc_array(NETTLM_WORDS, sizeof(u32), GFP_KERNEL);
+	if (!w)
+		return -ENOMEM;
+	err = warpnet_fetch_tlm(wn, 0, w);
+	if (err) {
+		kfree(w);
+		return err;
+	}
+
+	len = sysfs_emit(buf, "version %u%s  uptime %u ms\n", w[0],
+			 w[0] == NETTLM_VERSION ? "" : " (UNEXPECTED, field names may be wrong)", w[12]);
+	len += sysfs_emit_at(buf, len, "pool %u blocks, min free %u, queue max %u\n", w[4], w[5], w[6]);
+	len += sysfs_emit_at(buf, len, "rx polls %u (empty %u), doorbells %u avg %u max %u us\n",
+			     w[7], w[8], w[9], w[9] ? w[10] / w[9] : 0, w[11]);
+	len += sysfs_emit_at(buf, len, "esp tx dropped %u, waited %u, wait max %u us\n",
+			     w[13], w[14], w[15]);
+	for (i = 0; i < 2; i++) {
+		const u32 *f = &w[TLM_IFACE + 8 * i];
+
+		len += sysfs_emit_at(buf, len,
+				     "if%d: queued %u delivered %u dropQueueFull %u dropPoolEmpty %u dropSendFail %u peak %u present %u link %u\n",
+				     i, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+	}
+	len += tlm_emit_cmd(buf, len, "cmd tx", &w[TLM_CMDTX]);
+	len += tlm_emit_cmd(buf, len, "cmd rx", &w[TLM_CMDRX]);
+	len += sysfs_emit_at(buf, len, "esp spi: transactions %u avg %u max %u us\n",
+			     w[TLM_ESP], w[TLM_ESP] ? w[TLM_ESP + 1] / w[TLM_ESP] : 0, w[TLM_ESP + 2]);
+	len += sysfs_emit_at(buf, len, "esp radio: valid %u txFrames %u txNoMem %u txDropped %u busy %u\n",
+			     w[TLM_ESP + 3], w[TLM_ESP + 4], w[TLM_ESP + 5], w[TLM_ESP + 6], w[TLM_ESP + 7]);
+	kfree(w);
+	return len;
+}
+
+/* write anything: reset the board's counters */
+static ssize_t board_telemetry_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct warpnet *wn = dev_get_drvdata(dev);
+	u32 *w;
+	int err;
+
+	w = kmalloc_array(NETTLM_WORDS, sizeof(u32), GFP_KERNEL);
+	if (!w)
+		return -ENOMEM;
+	err = warpnet_fetch_tlm(wn, NETTLM_FLAG_RESET, w);
+	kfree(w);
+	return err ? err : count;
+}
+static DEVICE_ATTR_RW(board_telemetry);
+
 static int warpnet_probe(struct platform_device *pdev)
 {
 	struct cswarp_core *wc = cswarp_core_get(pdev);
@@ -614,6 +782,9 @@ static int warpnet_probe(struct platform_device *pdev)
 		destroy_workqueue(wn->wq);
 		return -ENODEV;
 	}
+	if (device_create_file(&pdev->dev, &dev_attr_latency) ||
+	    device_create_file(&pdev->dev, &dev_attr_board_telemetry))
+		dev_warn(&pdev->dev, "sysfs diagnostics attributes not created\n");
 	cswarp_dbg(CSWARP_DBG_NET, &pdev->dev, "%d of %d interfaces registered\n",
 		   added, ETH_IF_COUNT);
 	return 0;
@@ -623,6 +794,8 @@ static void warpnet_remove(struct platform_device *pdev)
 {
 	struct warpnet *wn = platform_get_drvdata(pdev);
 
+	device_remove_file(&pdev->dev, &dev_attr_latency);
+	device_remove_file(&pdev->dev, &dev_attr_board_telemetry);
 	/* closes the interfaces, which stops the doorbells, timer and link poll */
 	warpnet_remove_ifs(wn);
 	del_timer_sync(&wn->rx_timer);

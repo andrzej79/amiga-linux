@@ -29,6 +29,7 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
+#include <linux/math64.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/cswarp.h>
 #include <linux/module.h>
@@ -59,6 +60,7 @@ module_param(spin_us, uint, 0644);
 MODULE_PARM_DESC(spin_us, "Busy-wait this long for the ARM before sleeping (us)");
 
 #define CSWARP_POLL_SLICE_MS	10	/* irq fallback: re-check the CR this often */
+#define CSWARP_IRQ_GRACE_MS	20	/* a handshake bit older than this means a missed irq */
 #define CSWARP_DOORBELL_POLL_MS	20	/* doorbell polling with use_irq=0 */
 
 /* Wire layout checks against WarpAmiCommData.h (pack(2), big-endian) */
@@ -83,6 +85,7 @@ static_assert(offsetof(DprRplDiagMsg, warpBoardType) == 362);
 static_assert(offsetof(DprRplDiagMsg, wifiState) == 364);
 static_assert(sizeof(DprRplDiagMsg) == 412);
 static_assert(sizeof(DprRplDiagMsg) <= DPR_FRAME_SIZE);
+static_assert((1 + NETTLM_WORDS) * 4 <= DPR_FRAME_SIZE);
 
 /* ------------------------------------------------------------------------ */
 /* DPREG register file                                                      */
@@ -211,14 +214,20 @@ static void cswarp_poll_timer(struct timer_list *t)
 /* ------------------------------------------------------------------------ */
 
 /*
- * Wait for *flag (set by the irq) or, as a fallback, for the CR bit itself:
- * with use_irq=0 that is the only way, with the irq on it catches a missed
- * interrupt and counts it, which is worth knowing during bring-up.
+ * Wait for *flag (set by the irq) or, as a fallback, for the CR bit itself.
+ * With use_irq=0 polling is the only way.  With the irq on, a set bit is left
+ * to the handler for CSWARP_IRQ_GRACE_MS - INT2 can be held off for a while,
+ * e.g. by console output to the framebuffer with interrupts disabled - and
+ * only then taken here and counted as a missed interrupt.
  */
 static int cswarp_wait_flag(struct cswarp_core *wc, int *flag, u32 cr_bit,
 			    unsigned long deadline)
 {
-	ktime_t spin_end = ktime_add_us(ktime_get(), spin_us);
+	ktime_t start = ktime_get();
+	ktime_t spin_end = ktime_add_us(start, spin_us);
+	ktime_t grace_end = ktime_add_ms(start, CSWARP_IRQ_GRACE_MS);
+	/* at least two ticks: one jiffy may end right away (HZ=100 on Amiga) */
+	unsigned long slice = max_t(unsigned long, msecs_to_jiffies(CSWARP_POLL_SLICE_MS), 2);
 
 	for (;;) {
 		u32 cr;
@@ -227,23 +236,16 @@ static int cswarp_wait_flag(struct cswarp_core *wc, int *flag, u32 cr_bit,
 			return 0;
 
 		cr = dpreg_read(wc, DPREG_IDX_CR);
-		if (cr & cr_bit) {
-			/*
-			 * The bit is set but the irq has not run (yet).  Take it
-			 * ourselves while spinning, or count a missed irq once
-			 * we are past the spin phase.
-			 */
-			if (!wc->use_irq || ktime_after(ktime_get(), spin_end)) {
-				dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_CLR | cr_bit);
-				if (wc->use_irq) {
-					wc->stats.irq_missed++;
-					dev_warn_ratelimited(wc->dev,
-						"frame handshake bit 0x%x found by polling (irq missed?) CR 0x%08x\n",
-						cr_bit, cr);
-				}
-				WRITE_ONCE(*flag, 1);
-				return 0;
+		if ((cr & cr_bit) && (!wc->use_irq || ktime_after(ktime_get(), grace_end))) {
+			dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_CLR | cr_bit);
+			if (wc->use_irq) {
+				wc->stats.irq_missed++;
+				dev_warn_ratelimited(wc->dev,
+					"frame handshake bit 0x%x still set after %d ms, irq missed? CR 0x%08x\n",
+					cr_bit, CSWARP_IRQ_GRACE_MS, cr);
 			}
+			WRITE_ONCE(*flag, 1);
+			return 0;
 		}
 
 		if (time_after(jiffies, deadline))
@@ -253,10 +255,10 @@ static int cswarp_wait_flag(struct cswarp_core *wc, int *flag, u32 cr_bit,
 			udelay(2);
 			continue;
 		}
-		if (wc->use_irq)
-			wait_event_timeout(wc->frame_wq, READ_ONCE(*flag),
-					   msecs_to_jiffies(CSWARP_POLL_SLICE_MS));
-		else
+		if (wc->use_irq) {
+			wc->stats.xfer_slept++;
+			wait_event_timeout(wc->frame_wq, READ_ONCE(*flag), slice);
+		} else
 			usleep_range(50, 200);
 	}
 }
@@ -304,8 +306,7 @@ int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rp
 	cmd = z_readl(cswarp_frame(wc));
 	wc->last_cmd = cmd;
 	wc->stats.exchanges++;
-	if (cswarp_dbg_on(CSWARP_DBG_MBOX))
-		t0 = ktime_get();
+	t0 = ktime_get();
 
 	/* stale handshake bits would end the waits below at once */
 	dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_CLR | DPREG_CR_MR_ARM | DPREG_CR_MP_68K);
@@ -322,6 +323,14 @@ int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rp
 		err = cswarp_wait_flag(wc, &wc->frame_mp, DPREG_CR_MP_68K, deadline);
 
 	dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_CLR | DPREG_CR_IE_ARM | DPREG_CR_IE_68K);
+
+	{
+		u32 us = (u32)ktime_us_delta(ktime_get(), t0);
+
+		wc->stats.xfer_us_total += us;
+		if (us > wc->stats.xfer_us_max)
+			wc->stats.xfer_us_max = us;
+	}
 
 	if (err) {
 		/*
@@ -496,6 +505,7 @@ static int cswarp_read_diag(struct cswarp_core *wc)
 	wc->ide_timing[3] = diag->IDE_IOW_ng;
 	wc->ide_timing[4] = diag->IDE_ACK_as;
 	strscpy(wc->board_name, diag->boardName, sizeof(wc->board_name));
+	wc->wifi_channel = diag->wifiChannel <= 14 ? diag->wifiChannel : 0;
 
 	cswarp_fw_ver_str(wc->fw_ver, ver, sizeof(ver));
 	dev_info(wc->dev, "%s (type %u: %s), hw 0x%x, firmware %s (0x%04x), IDE %s\n",
@@ -555,16 +565,31 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr, cha
 	len = sysfs_emit(buf,
 			 "exchanges %lu\ntimeouts %lu\nbad_replies %lu\nbroken %d\n"
 			 "irqs %lu\nirqs_none %lu\nirq_missed %lu\nunit_unclaimed %lu\n"
-			 "irq_ie 0x%08x\nuse_irq %d\n",
+			 "irq_ie 0x%08x\nuse_irq %d\n"
+			 "xfer_us_avg %llu\nxfer_us_max %u\nxfer_slept %lu\n",
 			 s->exchanges, s->timeouts, s->bad_replies, wc->broken,
 			 s->irqs, s->irqs_none, s->irq_missed, s->unit_unclaimed,
-			 wc->unit_ie, wc->use_irq);
+			 wc->unit_ie, wc->use_irq,
+			 s->exchanges ? div_u64(s->xfer_us_total, s->exchanges) : 0ULL,
+			 s->xfer_us_max, s->xfer_slept);
 	for (n = 0; n < AUNIT_MAX; n++)
 		if (s->unit_irqs[n])
 			len += sysfs_emit_at(buf, len, "unit%d_irqs %lu\n", n, s->unit_irqs[n]);
 	return len;
 }
-static DEVICE_ATTR_RO(stats);
+static ssize_t stats_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct cswarp_core *wc = dev_get_drvdata(dev);
+
+	/* any write: restart the timing counters */
+	wc->stats.xfer_us_total = 0;
+	wc->stats.xfer_us_max = 0;
+	wc->stats.xfer_slept = 0;
+	wc->stats.exchanges = 0;
+	return count;
+}
+static DEVICE_ATTR_RW(stats);
 
 static ssize_t regs_show(struct device *dev, struct device_attribute *attr, char *buf)
 {

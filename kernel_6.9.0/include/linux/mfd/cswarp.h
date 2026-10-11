@@ -65,9 +65,13 @@ struct cswarp_stats {
 	unsigned long bad_replies;	/* unexpected reply type */
 	unsigned long irqs;		/* INT2 entries with something for us */
 	unsigned long irqs_none;	/* INT2 entries with nothing for us (other PORTS users) */
-	unsigned long irq_missed;	/* handshake bit found by polling, not by the irq */
+	unsigned long irq_missed;	/* handshake bit still set after the grace period, taken by polling */
 	unsigned long unit_irqs[AUNIT_MAX];
 	unsigned long unit_unclaimed;	/* doorbells for units nobody registered */
+	/* exchange timing (writing MP_ARM to the end of the wait) */
+	u64 xfer_us_total;
+	u32 xfer_us_max;
+	unsigned long xfer_slept;	/* exchanges that had to sleep for the irq */
 };
 
 struct cswarp_core {
@@ -84,6 +88,7 @@ struct cswarp_core {
 	u8 board_type;			/* enum warp_board_type */
 	char board_name[AMICOMM_BOARDNAME_LEN + 1];
 	bool native_ide;
+	u8 wifi_channel;		/* 2.4 GHz channel at probe, 0 = unknown/not connected */
 	u8 ide_timing[5];		/* IOR as/ng, IOW as/ng, ACK as */
 
 	/* the command/reply frame */
