@@ -1,418 +1,207 @@
-#ifndef CSWARPAMICOMMDATA_H
-#define CSWARPAMICOMMDATA_H
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * CS-Lab Warp turbo board - 68k <-> ARM dual-port RAM protocol.
+ *
+ * A subset of csWarpAmigaSoftware common/WarpAmiCommData.h (firmware 3.000),
+ * limited to what the Linux drivers use.  The layouts are a wire contract with
+ * the board firmware: keep every struct, offset and enum value identical to
+ * that header.  Enum values are written out explicitly so a reordering there
+ * cannot silently change them here; drivers/mfd/cswarp-core.c checks the
+ * offsets at build time.
+ *
+ * The frame is big-endian on the wire (the ARM side byte-swaps), which is the
+ * 68k's native order.
+ */
+#ifndef _ASM_M68K_CSWARPAMICOMMDATA_H
+#define _ASM_M68K_CSWARPAMICOMMDATA_H
 
-#include "cswarpamicommdata_sd.h"
+#include <linux/types.h>
+#include <linux/bits.h>
 
-#define AMICOMM_DBGMSG_LEN        256
-#define AMICOMM_PATH_LEN          128
-#define AMICOMM_BOARDNAME_LEN     32
-#define AMICOMM_USB_HOSTS         2
-#define AMICOMM_WIFI_SSID_LEN     128
-#define AMICOMM_WIFI_PASS_LEN     128
+/* ---- DPREG register file (at WARP_OFFSET_DPREG_CR) ---------------------- */
+/*
+ * Register idx lives at WARP_OFFSET_DPREG_CR + 4 * idx.  CR, IRQ_IF and IRQ_IE
+ * take set/clear writes: bit 31 selects set (1) or clear (0), bits 30..0 say
+ * which bits.  No read-modify-write is ever needed.
+ */
+#define DPREG_IDX_CR			0x00
+#define DPREG_IDX_ID			0x01	/* read only: DPREG_ID_VALUE */
+#define DPREG_IDX_IRQ_IF		0x02	/* ARM sets, 68k clears */
+#define DPREG_IDX_IRQ_IE		0x03	/* 68k only */
+#define DPREG_IDX_IRQ_PEND		0x04	/* read only: IRQ_IF & IRQ_IE */
+#define DPREG_IDX_UNIT_STATUS(n)	(0x10 + (n))
+#define DPREG_IDX_UNIT_COUNT(n)		(0x20 + (n))
 
-// -------------------------------------------------------------
-// FPGA DualPort RAM communication
-// Interrupts control register
-// -------------------------------------------------------------
-#define DPREG_CR_SET        0x80000000  // set bits in register
-#define DPREG_CR_CLR        0x00000000  // clr bits in register
-#define DPREG_CR_IE_ARM     (1UL << 0)  // ARM irq enable
-#define DPREG_CR_IE_68K     (1UL << 1)  // 68K irq enable
-#define DPREG_CR_MP_ARM     (1UL << 2)  // Msg pending (ARM)
-#define DPREG_CR_MP_68K     (1UL << 3)  // Msg pending (68K)
-#define DPREG_CR_MR_ARM     (1UL << 4)  // Msg received (ARM)
-#define DPREG_CR_MR_68K     (1UL << 5)  // Msg received (68K)
-// ethernet IRQ's (68k)
-#define DPREG_CR_IE_ETHRX   (1UL << 6)  // ETH rx irq enable
-#define DPREG_CR_IE_ETHTX   (1UL << 7)  // ETH tx irq enable
-#define DPREG_CR_IE_ETHST   (1UL << 8)  // ETH state irq enable
-#define DPREG_CR_IF_ETHRX   (1UL << 9)  // ETH rx irq
-#define DPREG_CR_IF_ETHTX   (1UL << 10) // ETH tx irq
-#define DPREG_CR_IF_ETHST   (1UL << 11) // ETH state irq
+#define DPREG_ID_VALUE			0x80570001UL
+#define DPREG_SET			0x80000000UL
+#define DPREG_CLR			0x00000000UL
+#define DPREG_ALL_BITS			0x7fffffffUL
 
-// Volume masks
-#define AUDVOLMASK_MIX_AMIGA  0x01
-#define AUDVOLMASK_MIX_MP3    0x02
-#define AUDVOLMASK_MASTER     0x04
+/* CR bits (register 0) */
+#define DPREG_CR_SET			DPREG_SET
+#define DPREG_CR_CLR			DPREG_CLR
+#define DPREG_CR_IE_ARM			BIT(0)	/* ARM irq enable */
+#define DPREG_CR_IE_68K			BIT(1)	/* 68k irq enable */
+#define DPREG_CR_MP_ARM			BIT(2)	/* message pending for the ARM */
+#define DPREG_CR_MP_68K			BIT(3)	/* reply pending for the 68k */
+#define DPREG_CR_MR_ARM			BIT(4)	/* ARM has taken the message */
+#define DPREG_CR_MR_68K			BIT(5)
+/*
+ * Bits 6..13 were the pre-23.00 doorbells (ethernet RX, AHI, floppy).  Nothing
+ * sets them any more but the FPGA still ORs them onto INT2, so they must be
+ * kept clear.
+ */
+#define DPREG_CR_LEGACY_DOORBELLS	0x00003fc0UL
 
-// Disk IO
-#define DISK_MAX_DPRAM_TRANSFER	7
-#define DISK_BLOCKSIZE 512
-#define DISK_NR_SD 0
-#define DISK_NR_USB 1
+/* Async units: unit n owns IRQ_IF/IRQ_IE bit n */
+#define AUNIT_AHI			0
+#define AUNIT_MHI			1
+#define AUNIT_ETH0			2	/* WiFi (ETH_IF_WIFI) has RX frames */
+#define AUNIT_ETH1			3	/* USB ethernet (ETH_IF_USB) has RX frames */
+#define AUNIT_SD			4
+#define AUNIT_USB0			5
+#define AUNIT_USB1			6
+#define AUNIT_CD			7
+#define AUNIT_FLOPPY			8
+#define AUNIT_JPEG			9
+#define AUNIT_EXT			10
+#define AUNIT_MAX			16
 
-// ETH/WIFI
-#define ETH_MTU_AND_HDR_SIZE    (1500 + 14)
-#define ETH_MAC_SIZE  6
+/* ---- Frame ---------------------------------------------------------------- */
+#define DPR_FRAME_SIZE			4096
 
-#pragma pack(2)
+/* Ethernet */
+#define ETH_MTU_AND_HDR_SIZE		(1500 + 14)
+#define ETH_MAC_SIZE			6
+#define ETH_IF_WIFI			0
+#define ETH_IF_USB			1
+#define ETH_IF_COUNT			2
+#define ETH_IF_ANY			0xff	/* dpcmdEthIfReceive only */
 
-typedef enum {
-  wacOK = 0,
-  wacTIMEOUT,
-  wacBREAK,
-  wacNOTINITIALIZED,
-  wacCOMERR,
-  wacBUFFERR,
-} WarpAmiCommStatus;
+/* Firmware version as reported in DprRplDiagMsg.fmwVer (release 30.54 = 0x3054) */
+#define WARP_FMW_VER(maj, min, bld)	((((u32)(maj)) << 12) | (((u32)(min)) << 8) | ((u32)(bld)))
+#define WARP_FMW_VER_DEVBUILD		WARP_FMW_VER(0, 9, 0)	/* no bootloader: accept */
+#define WARP_FMW_VER_MIN_ETHIF		WARP_FMW_VER(2, 2, 0x67)
+#define WARP_FMW_VER_MIN_ASYNC		WARP_FMW_VER(2, 3, 0x00)
+#define WARP_FMW_VER_MIN_LINUX		WARP_FMW_VER(3, 0, 0x00)	/* release 3.000 */
 
-// -------------------------------------------------------------
-// DualPort RAM communication
-// Command (sent FROM MC68060) Data types
-// -------------------------------------------------------------
-// main command types (send from Amiga)
-typedef enum {
-  dpcmdNop,
-  dpcmdDbgMsg,  
-  dpcmdJpegTest,
-  dpcmdAudioTest,
-  dpcmdSetCpuTurbo,
-  dpcmdSelectKick,
-  dpcmdGetDiag,
-  dpcmdSetIdeMode,
-  dpcmdSetIdeSpeed,
-  dpcmdSetHIDMouseRes,
-  dpcmdSetWiFiSSID,
-  dpcmdSetWiFiPass,
-  dpcmdSetTempRegulator,
-  dpcmdSetTimeZoneShift,
-  dpcmdOpenDir,
-  dpcmdCloseDir,
-  dpcmdReadDir,
-  dpcmdSDGetInfo,
-  dpcmdDiskWriteBlocks,
-  dpcmdDiskReadBlocks,
-  dpcmdGetHIDMouseRes,
-  dpcmdUSBDiskGetInfo,
-  dpcmdGetARMInfo,
-  dpcmdEthTransmit,
-  dpcmdEthReceive,
-  dpcmdEthGetMACAddr,
-  dpcmdGetMouseWheelData,
-} DprCmd;
+/* Commands (68k -> ARM), DprCmd */
+enum {
+	dpcmdGetDiag			= 6,
+	dpcmdSetIdeMode			= 7,
+	dpcmdEthTransmit		= 23,	/* legacy, interface 0 only */
+	dpcmdEthReceive			= 24,	/* legacy */
+	dpcmdEthGetMACAddr		= 25,	/* legacy */
+	dpcmdEthIfTransmit		= 47,	/* no reply */
+	dpcmdEthIfReceive		= 48,	/* reply dprplEthIfReceive */
+	dpcmdEthIfGetInfo		= 49,	/* reply dprplEthIfInfo */
+};
 
-// Audio command types
-typedef enum {
-  audcmdStop = 0,
-  audcmdPlay,
-  audcmdPause,
-  audcmdSetVolumes,
-} AudioCmd;
+/* Replies (ARM -> 68k), DprRpl */
+enum {
+	dprplNop			= 0,
+	dprplDiagFrame			= 1,
+	dprplEthReceive			= 10,
+	dprplEthMACAddr			= 11,
+	dprplEthIfReceive		= 23,
+	dprplEthIfInfo			= 24,
+};
 
-  // WiFi states
-typedef enum {
-  wifiUnknown,
-  wifiStarted,
-  wifiStopped,
-  wifiConnected,
-  wifiDisconnected
-} WiFiState;
+#pragma pack(push, 2)
 
-// common command header
 typedef struct {
-  uint32_t  cmd;
+	u32 cmd;
 } DprCmdHeader;
 
-// debug message sent from Amiga
 typedef struct {
-  DprCmdHeader  header;
-  uint8_t       msgType;
-  char          msg[AMICOMM_DBGMSG_LEN];
-} DprCmdDbgMsg;
-
-// JPEG decomp request
-typedef struct {
-  DprCmdHeader  header;
-  uint8_t       bitsPerPixel;
-  char          fileName[AMICOMM_PATH_LEN];          
-} DprCmdJpegTest;
-
-// AUDIO command data
-typedef struct {
-  DprCmdHeader  header;
-  uint8_t       audioCmd;
-  uint8_t       volSetMask;
-  uint8_t       mixAmiga;
-  uint8_t       mixMp3;
-  uint8_t       masterVolume;
-  char          fileName[AMICOMM_PATH_LEN];
-} DprCmdAudioTest;
-
-// Set M68k CPU turbo level command data
-typedef struct {
-  DprCmdHeader  header;
-  uint32_t      turboLevel;
-} DprCmdSetCpuTurbo;
-
-// Kickstart nr selection command data
-typedef struct {
-  DprCmdHeader header;
-  uint8_t kickNr;
-} DprCmdSelectKick;
-
-// IDE mode selection command data
-typedef struct {
-  DprCmdHeader header;
-  uint8_t nativeIdeEnable;
-} DprCmdIdeMode;
-
-// IDE speed command data
-typedef struct {
-  DprCmdHeader header;
-  uint8_t ataIOR_as;
-  uint8_t ataIOR_ng;
-  uint8_t ataIOW_as;
-  uint8_t ataIOW_ng;
-  uint8_t ataACK_as;
-} DprCmdIdeSpeed;
-
-// HID mouse resolution command data
-typedef struct {
-  DprCmdHeader header;
-  uint16_t hidMouseRes; // fixed point multiplier 256=1.0
-} DprCmdHIDMouseRes;
-
-// WiFi SSID setting
-typedef struct {
-  DprCmdHeader header;
-  char ssid[AMICOMM_WIFI_SSID_LEN];
-} DprCmdWiFiSSID;
-
-// WiFi Password setting
-typedef struct {
-  DprCmdHeader header;
-  char pass[AMICOMM_WIFI_PASS_LEN];
-} DprCmdWiFiPass;
-
-// Time zone shift
-typedef struct {
-  DprCmdHeader header;
-  int32_t shiftSecs;
-} DprCmdTimeZoneShift;
-
-// Temperature regulator settings
-typedef struct {
-  DprCmdHeader header;
-  int32_t mc68kTemp;
-  int32_t minPwmPercent;
-} DprCmdTempReg;
-
-// Open dir command
-typedef struct {
-  DprCmdHeader header;
-  char path[AMICOMM_PATH_LEN];
-} DprCmdOpenDir;
-
-// Disk ReadBlocks
-typedef struct {
-  DprCmdHeader header;
-  uint32_t blockAddr;
-  uint32_t readBlocksCnt;
-  uint32_t dmaDdrAddr;
-  uint8_t dmaEnable;
-  uint8_t diskNr;
-} DprCmdDiskReadBlocks;
-
-// Disk WriteBlocks
-typedef struct {
-	DprCmdHeader header;
-	uint32_t blockAddr;
-	uint32_t writeBlocksCnt;
-	uint8_t data[DISK_MAX_DPRAM_TRANSFER * DISK_BLOCKSIZE];
-  uint32_t dmaDdrAddr;
-  uint8_t dmaEnable;
-  uint8_t diskNr;
-} DprCmdDiskWriteBlocks;
-
-// Eth send packet
-typedef struct {
-  DprCmdHeader header;
-  uint16_t pktSize;
-  uint8_t packet[ETH_MTU_AND_HDR_SIZE];
-} DprCmdEthSend;
-
-// Command communication frame
-typedef union {
-  DprCmdHeader  header;
-  DprCmdDbgMsg  dbgMsg;
-  DprCmdJpegTest jpegTest;
-  DprCmdAudioTest audioTest;
-  DprCmdSetCpuTurbo setCpuTurbo;
-  DprCmdSelectKick kickSel;
-  DprCmdIdeMode ideMode;
-  DprCmdIdeSpeed ideSpeed;
-  DprCmdHIDMouseRes hidMouseRes;
-  DprCmdWiFiSSID wifiSSID;
-  DprCmdWiFiPass wifiPass;
-  DprCmdTempReg tempReg;
-  DprCmdTimeZoneShift timeZone;
-  DprCmdOpenDir openDir;
-  DprCmdDiskReadBlocks diskRead;
-  DprCmdDiskWriteBlocks diskWrite;
-  DprCmdEthSend ethSend;
-} DprCmdFrame;
-
-// -------------------------------------------------------------
-// DualPort RAM communication
-// Replies (sent TO MC68060) Data types
-// -------------------------------------------------------------
-// main reply types (send from ARM)
-typedef enum {
-  dprplNop,
-  dprplDiagFrame,
-  dprplOpenDirStatus,
-  dprplReadDir,
-  dprplSDGetInfo,
-  dprplDiskReadBlocks,
-  dprplDiskWriteBlocks,
-  dprplGetHIDMouseRes,
-  dprplUSBGetInfo,
-  dprplARMInfo,
-  dprplEthReceive,
-  dprplEthMACAddr,
-  dprplMouseWheelData,
-} DprRpl;
-
-// common reply header
-typedef struct {
-  uint32_t  rpl;
+	u32 rpl;
 } DprRplHeader;
 
-typedef enum {USBDevNone = 0, USBDevHID, USBDevMassStorage, USBDevOther} USBDevStatus;
-const char *USBDevStatusStr[] = {"No Device", "HID Device", "Mass Storage", "Other Device"};
-
-// Diagnostic data frame
+/* dpcmdEthIfTransmit: 'reserved' puts packet[] at offset 8 */
 typedef struct {
-  DprRplHeader  header;
-  float         vcc5v;
-  float         vBatt;
-  float         t60ntc;
-  float         t60internal;
-  float         tArm;
-  uint32_t      hwVer;
-  uint32_t      fmwVer;
-  uint32_t      currentTurboLevel;
-  uint32_t      fanPercent;
-  char          boardName[AMICOMM_BOARDNAME_LEN];
-  uint32_t      kickstartNr;
-  uint32_t      usbDevStatus[AMICOMM_USB_HOSTS];
-  char          wifiSSID[AMICOMM_WIFI_SSID_LEN];
-  char          wifiPass[AMICOMM_WIFI_PASS_LEN];
-  uint32_t      nativeIdeEnabled;
-  int32_t       tempRegCpu;
-  int32_t       tempRegMinPwm;
-  uint8_t       IDE_IOR_as;
-  uint8_t       IDE_IOR_ng;
-  uint8_t       IDE_IOW_as;
-  uint8_t       IDE_IOW_ng;
-  uint8_t       IDE_ACK_as;
-  int32_t       timeZoneCorrSecs;
-  uint8_t       warpBoardType;
-  uint32_t      wifiState;
+	DprCmdHeader header;
+	u8  ifNr;			/* ETH_IF_*, never ETH_IF_ANY */
+	u8  reserved;
+	u16 pktSize;
+	u8  packet[ETH_MTU_AND_HDR_SIZE];
+} DprCmdEthIfSend;
+
+/* dpcmdEthIfReceive / dpcmdEthIfGetInfo */
+typedef struct {
+	DprCmdHeader header;
+	u8 ifNr;
+	u8 reserved;
+} DprCmdEthIf;
+
+/* pktSize == 0: the queue named by the request is drained */
+typedef struct {
+	DprRplHeader header;
+	u8  ifNr;
+	u8  reserved;
+	u16 pktSize;
+	u8  packet[ETH_MTU_AND_HDR_SIZE];
+} DprRplEthIfRecv;
+
+/* present == 0: nothing behind this interface; mac[] is then meaningless */
+typedef struct {
+	DprRplHeader header;
+	u8  ifNr;
+	u8  present;
+	u8  linkUp;
+	u8  fullDuplex;
+	u32 bps;			/* 0 while the link is down */
+	u16 mtu;
+	u8  mac[ETH_MAC_SIZE];
+	u8  ifCount;
+	u8  reserved;
+} DprRplEthIfInfo;
+
+#define AMICOMM_BOARDNAME_LEN		32
+#define AMICOMM_USB_HOSTS		2
+#define AMICOMM_WIFI_SSID_LEN		128
+#define AMICOMM_WIFI_PASS_LEN		128
+
+/* dprplDiagFrame.  The float fields are carried as raw IEEE-754 words. */
+typedef struct {
+	DprRplHeader header;
+	u32 vcc5v;
+	u32 vBatt;
+	u32 t60ntc;
+	u32 t60internal;
+	u32 tArm;
+	u32 hwVer;
+	u32 fmwVer;
+	u32 currentTurboLevel;		/* obsolete */
+	u32 fanPercent;
+	char boardName[AMICOMM_BOARDNAME_LEN];
+	u32 kickstartNr;
+	u32 usbDevStatus[AMICOMM_USB_HOSTS];
+	char wifiSSID[AMICOMM_WIFI_SSID_LEN];
+	char wifiPass[AMICOMM_WIFI_PASS_LEN];
+	u32 nativeIdeEnabled;
+	s32 tempRegCpu;
+	s32 tempRegMinPwm;
+	u8  IDE_IOR_as;
+	u8  IDE_IOR_ng;
+	u8  IDE_IOW_as;
+	u8  IDE_IOW_ng;
+	u8  IDE_ACK_as;
+	s32 timeZoneCorrSecs;		/* obsolete */
+	u8  warpBoardType;
+	u32 wifiState;
+	u32 cpuFreqMHz;			/* float */
+	u32 cpuClkPhaseShiftDeg;	/* float */
+	u32 l2CacheSizeKB;
+	u32 l2CacheWays;
+	u32 l2CacheLineBytes;
+	u32 hdmiEnabled;
+	u32 wifiRssiValid;
+	s32 wifiRssi;
+	u32 wifiChannel;
+	u32 l2EarlyAckReg;
+	u32 l2EarlyAckMode;
 } DprRplDiagMsg;
 
-// Open dir status
-typedef struct {
-  DprRplHeader header;
-  uint32_t success;
-} DprRplOpenDirStatus;
+#pragma pack(pop)
 
-// Read dir data
-typedef struct {
-  DprRplHeader header;
-  char name[AMICOMM_PATH_LEN];
-  uint32_t size;
-  uint16_t date;
-  uint16_t time;
-  uint8_t isDir;
-  uint8_t isSys;
-  uint8_t isReadOnly;
-  uint8_t isHidden;
-} DprRplDirEntry;
-
-// SD Card GetInfo reply
-typedef struct {
-	DprRplHeader header;
-	uint8_t cardInitialized;
-	uint32_t state;
-	uint32_t type;
-	uint32_t blockNbr;
-	uint32_t blockSize;
-	AmiCommSD_CSD csd;
-	AmiCommSD_CID cid;
-} DprRplSDGetInfo;
-
-// Disk ReadBlocks reply
-typedef struct {
-	DprRplHeader header;
-	uint32_t readBlocksCnt;
-	uint8_t data[DISK_MAX_DPRAM_TRANSFER * DISK_BLOCKSIZE];
-} DprRplDiskReadBlocks;
-
-// Disk WriteBlocks reply
-typedef struct {
-	DprRplHeader header;
-	uint32_t writeBlocksCnt;
-} DprRplDiskWriteBlocks;
-
-// get HID mouse resolution reply data
-typedef struct {
-  DprRplHeader header;
-  uint16_t hidMouseRes; // fixed point multiplier 256=1.0
-} DprRplHIDMouseRes;
-
-// USB Disk GetInfo reply
-typedef struct {
-	DprRplHeader header;
-	uint8_t diskInitialized;
-	uint32_t state;
-	uint32_t type;
-	uint32_t blockNbr;
-	uint32_t blockSize;
-} DprRplUSBGetInfo;
-
-// ARM info data
-typedef struct {
-  DprRplHeader header;
-  uint32_t cpuRevId;
-  uint32_t halVersion;
-} DprRplARMInfo;
-
-// Eth receive packet
-typedef struct {
-  DprRplHeader header;
-  uint16_t pktSize;
-  uint8_t packet[ETH_MTU_AND_HDR_SIZE];
-} DprRplEthRecv;
-
-typedef struct {
-  DprRplHeader header;
-  uint8_t mac[ETH_MAC_SIZE];
-} DprRplEthMACAddr;
-
-typedef struct {
-  DprRplHeader header;
-  int8_t mouseWheelCnt;
-} DprRplMouseWheelData;
-
-// Reply communication frame
-typedef union {
-  DprRplHeader  header;
-  DprRplDiagMsg diag;
-  DprRplOpenDirStatus openDirStatus;
-  DprRplDirEntry dirEntry;
-  DprRplSDGetInfo sdInfo;
-  DprRplDiskReadBlocks diskRead;
-  DprRplDiskWriteBlocks diskWrite;
-  DprRplHIDMouseRes hidMouseRes;
-  DprRplUSBGetInfo usbInfo;
-  DprRplARMInfo armInfo;
-  DprRplEthRecv ethRecv;
-  DprRplEthMACAddr ethMAC;
-  DprRplMouseWheelData mouseWheel;
-} DprRplFrame;
-
-#pragma pack()
-
-#endif // CSWARPAMICOMMDATA_H
-
+#endif /* _ASM_M68K_CSWARPAMICOMMDATA_H */

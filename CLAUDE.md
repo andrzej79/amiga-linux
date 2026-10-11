@@ -26,19 +26,43 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
 ## How the pieces map onto upstream trees
 
 ### Kernel (`kernel_6.9.0/`)
-- The files under `kernel_6.9.0/` (`drivers/...`, `arch/m68k/include/asm/...`) go at the **same relative paths** in a Linux 6.9 source tree. They are new files, not diffs.
+- The files under `kernel_6.9.0/` (`drivers/...`, `arch/m68k/include/asm/...`, `include/linux/mfd/...`) go at the **same relative paths** in a Linux 6.9 source tree. They are new files, not diffs.
 - `sellen_mods_and_fixes.patch` is a git-style diff against the kernel root (apply with `git apply` / `patch -p1`). It contains:
-  - Kconfig/Makefile hooks for the three Warp drivers (`PATA_CSWARP`, `AMIWARPNET`, `FB_AMIGA_WARP`). The driver `.c` files are useless without this patch.
+  - Kconfig/Makefile hooks for the Warp core and drivers (`MFD_CSWARP`, `PATA_CSWARP`, `AMIWARPNET`, `FB_AMIGA_WARP`). The driver `.c` files are useless without this patch. To change it, apply it to pristine 6.9 copies of the touched files in a scratch git repo, edit there, and regenerate it with `git diff`.
   - CS-Lab Zorro IDs (`ZORRO_MANUF_CSLAB` = 0x1400, and the products DDR3/VRAM/CTRL/XROM) in `include/uapi/linux/zorro_ids.h` and `drivers/zorro/zorro.ids`.
   - Unrelated fixes: inverted button polarity in `amimouse.c`, and a `depth:` option plus debug printks in `amifb.c`.
-- `kernel_6.9_m68k_amiga_cfg` is the `.config` to use (`ARCH=m68k`, `CONFIG_LOCALVERSION="-amiga"`). It enables the Warp drivers built-in and disables the stock `FB_AMIGA`.
+- `kernel_6.9_m68k_amiga_cfg` is the `.config` to use (`ARCH=m68k`, `CONFIG_LOCALVERSION="-amiga"`). It enables `MFD_CSWARP` and the Warp drivers built-in and disables the stock `FB_AMIGA`. Because `olddefconfig` silently turns a new, unset Kconfig symbol off, add any new symbol to this file explicitly.
 - If you add or rename a driver, update both the source file here and the Kconfig/Makefile hunks in the patch.
 
 ### Warp driver architecture
-All three drivers bind to the Warp's Zorro devices. Most go through the **CTRL** board (`ZORRO_PROD_CSLAB_WARP_CTRL`). Its register window is laid out by offsets in `asm/cswarpdefs.h` (`WARP_OFFSET_DPRAM`, `_DPREG_CR`, `_ATA`, `_QSDMA`, `_SYSCFG`, and the video register blocks `WarpRegs_mclk/pix/bclk`).
-- `amiwarpfb.c`: fbdev driver. Probes the **VRAM** Zorro device and also looks up CTRL for registers. It supports the hardware blitter, pattern blitter, line draw, CLUT, sprite and the pixel clock modes enumerated in `cswarpdefs.h`. Options come from `video=amiwarpfb:...` (`fb_get_options`) or the `mode_option`/`depth_option` module params.
-- `amiwarpnet.c`: Ethernet. The network itself is handled by the board's ARM side. The 68k talks to it through a **dual-port RAM mailbox**: it writes a `DprCmdFrame` at `ctrlBase | WARP_OFFSET_DPRAM`, signals via `DPREG_CR` bits and reads back a `DprRplFrame`. The IRQ is the shared `IRQ_AMIGA_PORTS`. The protocol structs and command enums are in `asm/cswarpamicommdata.h` (`#pragma pack(2)`). They must stay binary-compatible with the Warp firmware, so don't reorder or resize fields.
-- `pata_cswarp.c`: libata driver for the on-board IDE at `WARP_OFFSET_ATA`. It needs `idemode=native` set in the Warp configuration.
+The drivers target Warp firmware package **3.000+** (the state before this rework is git tag `before_v3`). `kernel_6.9.0/WARP_DRIVERS.md` lists the kernel command-line options, the debug mask bits and the sysfs files.
+- **`drivers/mfd/cswarp-core.c`** (`MFD_CSWARP`) is the only driver that binds the Zorro **CTRL** board. It is the Linux counterpart of AmigaOS `cswarp.library`. It owns:
+  - the register window, mapped with `z_ioremap`;
+  - the one 4 KB DPRAM command/reply frame, behind `frame_lock` (a mutex: exchanges sleep);
+  - the shared INT2 (`IRQ_AMIGA_PORTS`) handler. It clears the CR handshake bits (MR_ARM/MP_68K), then the async-unit doorbells (`IRQ_PEND` → clear `IRQ_IF` → dispatch).
+
+  At probe it checks the DPREG id (`0x80570001`) and the firmware version from `dpcmdGetDiag`, quiesces every INT2 source, then adds the MFD children `cswarp-net`, `cswarp-ata` and `cswarp-fb`. Its API is in `include/linux/mfd/cswarp.h`:
+  - `cswarp_frame_lock`/`_exchange`/`_unlock` and `cswarp_xfer`;
+  - `cswarp_unit_register`;
+  - the `cswarp_dbg()` macro, driven by the `cswarp_core.dbg` bitmask.
+
+  After an exchange times out, the core marks the frame broken: a late reply from the ARM must never land in the next caller's frame.
+- **`amiwarpnet.c`** registers two netdevs (`eth%d`): if 0 = WiFi, if 1 = USB ethernet. All board access runs on one ordered workqueue, because exchanges sleep while `ndo_start_xmit` cannot:
+  - TX frames are queued per interface and sent round-robin;
+  - the RX doorbells (`AUNIT_ETH0/1`) trigger a drain with `dpcmdEthIfReceive(ETH_IF_ANY)`;
+  - link state and MAC come from `dpcmdEthIfGetInfo`, polled every second.
+
+  The link worker only `rtnl_trylock()`s, because `ndo_stop` flushes the workqueue under RTNL.
+- **`pata_cswarp.c`** handles the native IDE at CTRL+0x6000, with a 4-byte stride and ctl at +0x1018. It uses polled PIO with no IRQ. It refuses to bind unless the diag reply says native IDE mode: in Gayle-emulation mode the window isn't decoded.
+- **`amiwarpfb.c`** gets the VRAM Zorro board (24 MB used) plus the core's registers.
+  - **Mode-set order:** program the pixel clock first (`amiwarp_vidclk.c`, which reprograms the video MMCM through DRP, 25–148.5 MHz). Only touch PIXC-block registers once the MMCM is locked; otherwise the bus cycle never ends.
+  - **Blitter addresses** are VRAM *physical* addresses: the hardware uses bits 24:4.
+  - **Sync polarity** comes from `var->sync`.
+  - On remove/shutdown it restores the native 108.125 MHz scandoubler output.
+- **`amiwarp_vidclk.c`** is a bit-exact port of `csWarpAmigaSoftware/common/mmcm_drp.c` + `vidclk_hw.c`. Keep it in sync with them: if those change, re-port and compare outputs over the whole clock range.
+- **Register access:** Warp registers are big-endian 32-bit words. Use `z_readl`/`z_writel`; `readl`/`writel` are little-endian on m68k.
+- **Headers:** `asm/cswarpdefs.h` (register offsets) and `asm/cswarpamicommdata.h` (the protocol subset) mirror `csWarpAmigaSoftware/common/WarpDefs.h`, `WarpRegisters.h` and `WarpAmiCommData.h`. They are a wire contract: enum values are explicit, structs use `#pragma pack(2)`, and `cswarp-core.c` `static_assert`s the offsets.
+- **Reference sources:** `~/workprojects/csAmigaWarp` (STM32 firmware `Arm/csArmedWarp`, FPGA `hdl/`) and `~/workprojects/csWarpAmigaSoftware` (AmigaOS drivers, shared headers in `common/`). Don't modify them from this repo's sessions unless explicitly asked.
 
 ### Buildroot (`buildroot_2024.02/`, `buildroot_2024.05/`)
 - `buildroot_cfg_*` are full Buildroot `.config` files: m68k 68040, glibc, GCC 13, shared libs, tar rootfs. `BR2_LINUX_KERNEL` is **not** set, because the kernel is built separately from the tree above.

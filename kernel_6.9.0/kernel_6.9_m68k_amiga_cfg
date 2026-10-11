@@ -1980,6 +1980,8 @@ CONFIG_BCMA_POSSIBLE=y
 #
 # Multifunction device drivers
 #
+CONFIG_MFD_CORE=y
+CONFIG_MFD_CSWARP=y
 # CONFIG_MFD_SMPRO is not set
 # CONFIG_MFD_BCM590XX is not set
 # CONFIG_MFD_BD9571MWV is not set

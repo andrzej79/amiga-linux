@@ -1,28 +1,26 @@
 diff --git a/drivers/ata/Kconfig b/drivers/ata/Kconfig
-index 928ec93c6b45..4756ee4bd778 100644
+index 928ec93..38990ec 100644
 --- a/drivers/ata/Kconfig
 +++ b/drivers/ata/Kconfig
-@@ -1025,6 +1025,18 @@ config PATA_GAYLE
+@@ -1025,6 +1025,16 @@ config PATA_GAYLE
  
  	  If unsure, say N.
  
 +config PATA_CSWARP
-+	tristate "Amiga CS Warp PATA support"
-+	depends on M68K && AMIGA
++	tristate "CS-Lab Warp native IDE support"
++	depends on MFD_CSWARP
 +	help
-+	  This option enables support for the on-board IDE
-+	  interface on CS-Lab Warp Expansion Card
-+	  (NOTE that idemode=native has to be set in Warp
-+	  Configuration)
++	  This option enables support for the on-board IDE interface
++	  of the CS-Lab Warp turbo boards.  The board must be in native
++	  IDE mode (the factory default; "WarpTool IDEMode=native").
 +
 +	  If unsure, say N.
-+
 +
  config PATA_BUDDHA
  	tristate "Buddha/Catweasel/X-Surf PATA support"
  	depends on ZORRO
 diff --git a/drivers/ata/Makefile b/drivers/ata/Makefile
-index 20e6645ab737..7b9b87ebacea 100644
+index 20e6645..7b9b87e 100644
 --- a/drivers/ata/Makefile
 +++ b/drivers/ata/Makefile
 @@ -98,6 +98,7 @@ obj-$(CONFIG_PATA_WINBOND)	+= pata_sl82c105.o
@@ -34,7 +32,7 @@ index 20e6645ab737..7b9b87ebacea 100644
  obj-$(CONFIG_PATA_ISAPNP)	+= pata_isapnp.o
  obj-$(CONFIG_PATA_IXP4XX_CF)	+= pata_ixp4xx_cf.o
 diff --git a/drivers/input/mouse/amimouse.c b/drivers/input/mouse/amimouse.c
-index 2fbbaeb76d70..97488ba239ec 100644
+index 2fbbaeb..97488ba 100644
 --- a/drivers/input/mouse/amimouse.c
 +++ b/drivers/input/mouse/amimouse.c
 @@ -58,9 +58,9 @@ static irqreturn_t amimouse_interrupt(int irq, void *data)
@@ -50,25 +48,64 @@ index 2fbbaeb76d70..97488ba239ec 100644
  
  	input_sync(dev);
  
+diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+index 4b023ee..4533237 100644
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -11,6 +11,21 @@ config MFD_CORE
+ 	select IRQ_DOMAIN
+ 	default n
+ 
++config MFD_CSWARP
++	tristate "CS-Lab Warp turbo board core"
++	depends on AMIGA && ZORRO
++	select MFD_CORE
++	help
++	  Core driver for the CS-Lab Warp Amiga turbo boards (Warp560,
++	  Warp1240/1260/1260X, Warp7060, ...).  It owns the board's control
++	  registers, the dual-port RAM command channel to the board's ARM
++	  and its INT2 interrupt, and creates the network, IDE and RTG
++	  framebuffer function devices.
++
++	  Requires Warp firmware package 3.000 or later.
++
++	  Debug messages: cswarp_core.dbg=<mask> on the kernel command line.
++
+ config MFD_CS5535
+ 	tristate "AMD CS5535 and CS5536 southbridge core functions"
+ 	select MFD_CORE
+diff --git a/drivers/mfd/Makefile b/drivers/mfd/Makefile
+index c66f07e..9ffd79a 100644
+--- a/drivers/mfd/Makefile
++++ b/drivers/mfd/Makefile
+@@ -116,6 +116,7 @@ obj-$(CONFIG_MFD_MC13XXX_SPI)	+= mc13xxx-spi.o
+ obj-$(CONFIG_MFD_MC13XXX_I2C)	+= mc13xxx-i2c.o
+ 
+ obj-$(CONFIG_MFD_CORE)		+= mfd-core.o
++obj-$(CONFIG_MFD_CSWARP)	+= cswarp-core.o
+ 
+ ocelot-soc-objs			:= ocelot-core.o ocelot-spi.o
+ obj-$(CONFIG_MFD_OCELOT)	+= ocelot-soc.o
 diff --git a/drivers/net/ethernet/Kconfig b/drivers/net/ethernet/Kconfig
-index 6a19b5393ed1..c4e1a4faca87 100644
+index 6a19b53..f200c05 100644
 --- a/drivers/net/ethernet/Kconfig
 +++ b/drivers/net/ethernet/Kconfig
-@@ -190,4 +190,12 @@ source "drivers/net/ethernet/wiznet/Kconfig"
+@@ -190,4 +190,13 @@ source "drivers/net/ethernet/wiznet/Kconfig"
  source "drivers/net/ethernet/xilinx/Kconfig"
  source "drivers/net/ethernet/xircom/Kconfig"
  
 +config AMIWARPNET
-+	tristate "Amiga CSWarp Network support"
-+	depends on AMIGA
-+	select CRC32
++	tristate "CS-Lab Warp network support"
++	depends on MFD_CSWARP
 +	help
-+	  Amiga CS-Lab Warp Turbo Board network driver.
-+	  If you don't have Warp board, say N.
++	  Network driver for the CS-Lab Warp turbo boards: the on-board
++	  WiFi and a USB ethernet adapter plugged into the board, both
++	  as ethN interfaces.
++	  If you don't have a Warp board, say N.
 +
  endif # ETHERNET
 diff --git a/drivers/net/ethernet/Makefile b/drivers/net/ethernet/Makefile
-index 0d872d4efcd1..21accf90613f 100644
+index 0d872d4..e7492d4 100644
 --- a/drivers/net/ethernet/Makefile
 +++ b/drivers/net/ethernet/Makefile
 @@ -104,3 +104,4 @@ obj-$(CONFIG_NET_VENDOR_XILINX) += xilinx/
@@ -76,9 +113,8 @@ index 0d872d4efcd1..21accf90613f 100644
  obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
  obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
 +obj-$(CONFIG_AMIWARPNET) += amiwarpnet.o
-\ No newline at end of file
 diff --git a/drivers/video/fbdev/Kconfig b/drivers/video/fbdev/Kconfig
-index 197b6d5268e9..b2bc5ca9a6e0 100644
+index 197b6d5..276df3f 100644
 --- a/drivers/video/fbdev/Kconfig
 +++ b/drivers/video/fbdev/Kconfig
 @@ -243,6 +243,15 @@ config FB_FM2
@@ -86,31 +122,31 @@ index 197b6d5268e9..b2bc5ca9a6e0 100644
  	  card from BSC (exhibited 1992 but not shipped as a CBM product).
  
 +config FB_AMIGA_WARP
-+	bool "Amiga CS-Lab Warp Video Support"
-+	depends on AMIGA && (FB = y) && ZORRO
-+	select FB_IOMEM_HELPERS 
-+	select FB_SYSMEM_HELPERS
++	bool "CS-Lab Warp RTG video support"
++	depends on (FB = y) && (MFD_CSWARP = y)
++	select FB_IOMEM_HELPERS
 +	help
-+	  This is the frame buffer device driver for the Amiga Warp Turbo card
-+	  from CS-Lab s.c.
++	  Frame buffer driver for the RTG video output of the CS-Lab Warp
++	  turbo boards (8/16/32 bpp, programmable pixel clock, blitter).
++	  Requires Warp firmware package 3.000 or later.
 +
  config FB_ARC
  	tristate "Arc Monochrome LCD board support"
  	depends on FB && (X86 || COMPILE_TEST)
 diff --git a/drivers/video/fbdev/Makefile b/drivers/video/fbdev/Makefile
-index 3eecd51267fa..bee9b72bfe44 100644
+index 3eecd51..dcff508 100644
 --- a/drivers/video/fbdev/Makefile
 +++ b/drivers/video/fbdev/Makefile
 @@ -13,6 +13,7 @@ obj-$(CONFIG_FB_WMT_GE_ROPS)   += wmt_ge_rops.o
  
  # Hardware specific drivers go first
  obj-$(CONFIG_FB_AMIGA)            += amifb.o c2p_planar.o
-+obj-$(CONFIG_FB_AMIGA_WARP)       += amiwarpfb.o
++obj-$(CONFIG_FB_AMIGA_WARP)       += amiwarpfb.o amiwarp_vidclk.o
  obj-$(CONFIG_FB_ARC)              += arcfb.o
  obj-$(CONFIG_FB_CLPS711X)	  += clps711x-fb.o
  obj-$(CONFIG_FB_CYBER2000)        += cyber2000fb.o
 diff --git a/drivers/video/fbdev/amifb.c b/drivers/video/fbdev/amifb.c
-index 305f396c764c..270a2836d9ca 100644
+index 305f396..270a283 100644
 --- a/drivers/video/fbdev/amifb.c
 +++ b/drivers/video/fbdev/amifb.c
 @@ -628,6 +628,7 @@ static u_long videomemory;
@@ -151,7 +187,7 @@ index 305f396c764c..270a2836d9ca 100644
  	}
  
  	if (min_fstrt < 48)
-@@ -3665,7 +3672,7 @@ static int __init amifb_probe(struct platform_device *pdev)
+@@ -3665,7 +3672,7 @@ default_chipset:
  	info->device = &pdev->dev;
  
  	if (!fb_find_mode(&info->var, info, mode_option, ami_modedb,
@@ -161,7 +197,7 @@ index 305f396c764c..270a2836d9ca 100644
  		goto release;
  	}
 diff --git a/drivers/zorro/zorro.ids b/drivers/zorro/zorro.ids
-index 119abea8c6cb..33418af7488a 100644
+index 119abea..33418af 100644
 --- a/drivers/zorro/zorro.ids
 +++ b/drivers/zorro/zorro.ids
 @@ -400,6 +400,11 @@
@@ -177,7 +213,7 @@ index 119abea8c6cb..33418af7488a 100644
  	6400  ISDN Engine I [ISDN Interface]
  2017  Vortex
 diff --git a/include/uapi/linux/zorro_ids.h b/include/uapi/linux/zorro_ids.h
-index 6e574d7b7d79..e293ff594060 100644
+index 6e574d7..e293ff5 100644
 --- a/include/uapi/linux/zorro_ids.h
 +++ b/include/uapi/linux/zorro_ids.h
 @@ -449,6 +449,12 @@

@@ -135,7 +135,8 @@ kernel_prepare() {
         echo "$stamp" > "$K_SRC/.amiga-patch"
     fi
     # Warp driver sources go in at the same relative paths
-    rsync -a --exclude .DS_Store "$REPO/kernel_6.9.0/drivers" "$REPO/kernel_6.9.0/arch" "$K_SRC/"
+    rsync -a --exclude .DS_Store "$REPO/kernel_6.9.0/drivers" "$REPO/kernel_6.9.0/arch" \
+        "$REPO/kernel_6.9.0/include" "$K_SRC/"
     mkdir -p "$K_OUT"
     cp "$REPO/$KERNEL_CONFIG" "$K_OUT/.config"
     kernel_make olddefconfig >/dev/null
