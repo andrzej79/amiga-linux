@@ -50,3 +50,29 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Build artifacts from build.sh
+output/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+Icon?
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Kernel/Buildroot leftovers
+*.orig
+*.rej
+*.part
