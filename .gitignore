@@ -1,5 +1,7 @@
 # Prerequisites
 *.d
+# ...but not systemd-style drop-in directories in the rootfs overlay
+!*.conf.d/
 
 # Object files
 *.o
