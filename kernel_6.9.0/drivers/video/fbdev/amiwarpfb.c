@@ -172,38 +172,94 @@ static int warpfb_wait_blitter(struct warpfb_par *par)
  * board's ESP32 uses costs frames on the air, and the module's block-ack
  * reorder buffer then holds everything behind a lost frame - pings of
  * hundreds of ms in bursts.  Seen with 1024x768@60 (65 MHz * 37 = 2405 MHz) on
- * channel 1, hence the slightly off-spec 800x600/1024x768 clocks in the mode
- * table, the same ones the AmigaOS driver's Picasso96 settings use.  108 MHz (1280x1024@60, also the scandoubler) and 148.5 MHz
- * (1920x1080@60) keep every harmonic out of 2401..2483 MHz.
+ * channel 1.  So, like the AmigaOS driver's Picasso96 settings (1024x768 at
+ * 64.375 MHz), every mode set moves its clock off the current channel: the
+ * smallest shift that clears it, downwards first, at most +-2.5% (monitors
+ * take that as a slightly different refresh).  The channel is the one the
+ * board reported at boot (diag).  wifi_dodge=0 turns this off.
  */
+#define WIFI_MARGIN_KHZ		2000	/* beyond the 22 MHz channel */
+#define WIFI_DODGE_STEPS	10	/* x 0.25% */
+
+static bool wifi_dodge = true;
+module_param(wifi_dodge, bool, 0644);
+MODULE_PARM_DESC(wifi_dodge, "Shift pixel clocks whose harmonics hit the board's WiFi channel");
+
+/* the channel's band in kHz, margin included; false when unknown */
+static bool wifi_band(u8 ch, u32 *lo, u32 *hi)
+{
+	u32 c;
+
+	if (ch >= 1 && ch <= 13)
+		c = (2407 + 5 * ch) * 1000;
+	else if (ch == 14)
+		c = 2484000;
+	else
+		return false;
+	*lo = c - 11000 - WIFI_MARGIN_KHZ;
+	*hi = c + 11000 + WIFI_MARGIN_KHZ;
+	return true;
+}
+
+/* the first harmonic of khz at or above lo, if it is not above hi */
+static bool harmonic_in(u32 khz, u32 lo, u32 hi, u32 *h)
+{
+	if (!khz)
+		return false;
+	*h = DIV_ROUND_UP(lo, khz) * khz;
+	return *h <= hi;
+}
+
+/*
+ * The clock to use for a request of hz: hz itself, or the nearest clock
+ * within +-2.5% whose achievable PLL setting keeps every harmonic out of the
+ * WiFi channel.  Fills cfg; returns the achieved clock.
+ */
+static u32 warpfb_pick_clock(struct warpfb_par *par, u32 hz, struct warp_vidclk_cfg *cfg)
+{
+	u32 achieved = warp_vidclk_find(hz, cfg), lo, hi, h;
+	int k;
+
+	if (!wifi_dodge || !wifi_band(par->wc->wifi_channel, &lo, &hi) ||
+	    !harmonic_in(achieved / 1000, lo, hi, &h))
+		return achieved;
+
+	for (k = 1; k <= WIFI_DODGE_STEPS; k++) {
+		u32 step = hz / 400 * k;	/* 0.25% per step */
+		u32 cand[2] = { hz - step, hz + step };
+		int i;
+
+		for (i = 0; i < 2; i++) {
+			struct warp_vidclk_cfg c;
+			u32 a;
+
+			if (cand[i] < VIDCLK_MIN_HZ || cand[i] > VIDCLK_MAX_HZ)
+				continue;
+			a = warp_vidclk_find(cand[i], &c);
+			if (harmonic_in(a / 1000, lo, hi, &h))
+				continue;
+			cswarp_dbg(CSWARP_DBG_FB, par->dev,
+				   "pixel clock %u Hz -> %u Hz (%s%u.%02u%%) to keep harmonics off WiFi channel %u\n",
+				   achieved, a, i ? "+" : "-", k / 4, (k % 4) * 25,
+				   par->wc->wifi_channel);
+			*cfg = c;
+			return a;
+		}
+	}
+	return achieved;	/* no clean clock nearby: set_par warns */
+}
+
 static void warpfb_check_wifi(struct warpfb_par *par, u32 pixclk_hz)
 {
 	u8 ch = par->wc->wifi_channel;
 	u32 f = pixclk_hz / 1000, lo, hi, h;	/* kHz */
 
-	if (!f)
+	if (!wifi_band(ch, &lo, &hi) || !harmonic_in(f, lo, hi, &h))
 		return;
-	if (ch >= 1 && ch <= 13) {
-		lo = (2407 + 5 * ch - 11) * 1000;
-		hi = (2407 + 5 * ch + 11) * 1000;
-	} else if (ch == 14) {
-		lo = 2473000;
-		hi = 2495000;
-	} else {
-		lo = 2401000;
-		hi = 2483000;
-	}
-	h = DIV_ROUND_UP(lo, f) * f;	/* first harmonic at or above lo */
-	if (h > hi)
-		return;
-	if (ch)
-		dev_warn(par->dev,
-			 "pixel clock %u.%03u MHz: harmonic %u x = %u MHz falls into WiFi channel %u - expect WiFi packet loss and latency; 1280x1024@60 or 1920x1080@60 avoid it\n",
-			 f / 1000, f % 1000, h / f, h / 1000, ch);
-	else
-		dev_info(par->dev,
-			 "pixel clock %u.%03u MHz: harmonic %u x = %u MHz is inside the 2.4 GHz WiFi band; if WiFi is slow, use 1280x1024@60 or 1920x1080@60\n",
-			 f / 1000, f % 1000, h / f, h / 1000);
+	dev_warn(par->dev,
+		 "pixel clock %u.%03u MHz: harmonic %u x = %u MHz falls into WiFi channel %u%s - expect WiFi packet loss and latency\n",
+		 f / 1000, f % 1000, h / f, h / 1000, ch,
+		 wifi_dodge ? " (no clean clock within 2.5%)" : " (wifi_dodge off)");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -261,7 +317,7 @@ static int warpfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 		cswarp_dbg(CSWARP_DBG_FB, par->dev, "check_var: pixel clock %u Hz out of range\n", hz);
 		return -EINVAL;
 	}
-	achieved = warp_vidclk_find(hz, &cfg);
+	achieved = warpfb_pick_clock(par, hz, &cfg);
 	var->pixclock = KHZ2PICOS(achieved / 1000);
 
 	switch (bpp) {
@@ -321,7 +377,7 @@ static int warpfb_set_par(struct fb_info *info)
 	vtotal = vsync_end + var->upper_margin;
 
 	hz = var_pixclk_hz(var);
-	achieved = warp_vidclk_find(hz, &cfg);
+	achieved = warpfb_pick_clock(par, hz, &cfg);
 
 	cswarp_dbg(CSWARP_DBG_FB, par->dev,
 		   "set_par %ux%u (virt %ux%u) %u bpp, line %u B, htotal %u vtotal %u, sync %s/%s, clock %u Hz -> %u Hz (D=%u d=%u m8=%u), %u.%02u Hz refresh\n",
@@ -672,8 +728,13 @@ static int warpfb_probe(struct platform_device *pdev)
 	info->fix = warpfb_fix_default;
 	info->fix.smem_start = par->vram_phys;
 	info->fix.smem_len = WARP_VRAM_SIZE;
+	/*
+	 * What user space (the X driver) may mmap: only the first page of the
+	 * CTRL board - blitter, display, CLUT and sprite registers.  The DPRAM
+	 * mailbox (+0x1000) and the IDE port (+0x6000) belong to the kernel.
+	 */
 	info->fix.mmio_start = wc->phys;
-	info->fix.mmio_len = wc->size;
+	info->fix.mmio_len = WARP_OFFSET_DPREG_CR;
 	info->screen_base = vram_cached ? ioremap_wt(par->vram_phys, WARP_VRAM_SIZE)
 					: z_ioremap(par->vram_phys, WARP_VRAM_SIZE);
 	if (!info->screen_base) {
