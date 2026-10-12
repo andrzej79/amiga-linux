@@ -1,0 +1,9 @@
+config BR2_PACKAGE_XDRIVER_XF86_VIDEO_WARP
+	bool "xf86-video-warp"
+	depends on BR2_m68k
+	depends on BR2_PACKAGE_XSERVER_XORG_SERVER_MODULAR
+	help
+	  Xorg driver for the CS-Lab Warp RTG frame buffer (amiwarpfb):
+	  shadow frame buffer pushed to VRAM with move16, blitter copies
+	  and fills, FPGA sprite as the hardware cursor.
+	  Use Driver "warp" in xorg.conf.

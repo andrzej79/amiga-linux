@@ -23,6 +23,19 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
 - The kernel is compiled with the **Buildroot toolchain** of the selected config (`make toolchain` runs if needed), not with a distro cross-gcc. Buildroot's GCC defaults to `-mcpu=68040`, so `kernel_make` passes `KCFLAGS/KAFLAGS=-m68020` whenever the kernel config enables 68020/68030. Without it, the 030 MMU inline asm (`pmove %psr`, `ptestr`, `ploadr`) fails to assemble. Kernel builds are out-of-tree (`O=/work/linux-build`). The pristine `linux-6.9` tree is re-extracted and re-patched whenever `sellen_mods_and_fixes.patch` changes.
 - The repo configs are copied in and run through `olddefconfig` on every build. They are only written back by the `*-menuconfig` commands.
 
+### X driver (`xdriver/`, `br2-external/`)
+- `xdriver/warp_drv.c` is the Xorg 21.1 video driver `warp`, derived from xf86-video-fbdev. Build it quickly with `docker run --rm -v amiga-linux-work:/work -v "$PWD:/repo" amiga-linux-build sh /repo/xdriver/build-in-container.sh` (output: `output/xdriver/warp_drv.so`). For the rootfs, it is the Buildroot package `xdriver_xf86-video-warp` in the `br2-external/` tree; `build.sh` always passes `BR2_EXTERNAL`.
+- Design, following VRAM measurements (move16 writes about 52 MB/s, memcpy about 30, CPU read-modify-write about 10):
+  - Software rendering goes into a shadow buffer in RAM with the same pitch as VRAM, pushed with `move16` in 16-byte columns. CPU writes to RAM are only about 55 MB/s too, so avoid making the CPU touch pixels the blitter can do.
+  - On-screen copies (`CopyArea`, `CopyWindow`) and text (`ImageText`/`PolyText` through the **template blitter**: glyphs ORed into a 1-bit template of up to 1024 words, JAM2/JAM1) are done in VRAM only. Pending work is flushed first. The area then becomes **stale** (the shadow is wrong there, in 16-byte columns). Software drawing into or reading from a stale area first refreshes it from VRAM (the damage pre-report and `SourceValidate`). Columns an opaque op overwrites whole (ImageText, fills, PutImage, CopyArea from a pixmap) are skipped.
+  - Solid fills are **queued** (`pend`, exact pixels) and done by the blitter at the next push, just before the shadow goes out, so a clear and what is drawn over it appear together. Software drawing over a queued fill gets that part CPU-filled into the shadow first. After the push, what is left of `pend` becomes stale. `WarpBlockHandler` runs the queue when no software damage is pending.
+  - The FPGA sprite (32x48, 3 colours) is the hardware cursor; ARGB cursors are reduced to black, grey and white.
+- Options: `AccelText`, `DeferFills` (both default on), `AccelMinPixels`, `Move16`, `HWCursor`, `Debug`. `Verify` is for debugging: after each push it compares 1/16 of the screen (outside stale) between VRAM and the shadow, and redraws every blitter `ImageText` with fb to compare it. Counts are in the exit `stats:` line.
+- Benchmarking: `xdriver/tools/xdragbench.c` (build with `sh /repo/xdriver/tools/build-in-container.sh`) drags an override-redirect window across the screen and reports moves/s. Run it over an xterm full of text to include expose redraws.
+- **Wrap every GC op.** Damage sits inside this wrapper and restores its own ops table after each op it handles, so a partial table silently drops out of the GC. That was the cause of the first "0 copies" result.
+- The kernel exposes only the first 4 KB of the CTRL board to user space (`fix.mmio_len`), which holds the blitter, display, CLUT and sprite registers. That page is what `fbdevHWMapMMIO` maps.
+- The exit log line `WARP(0): stats:` counts accelerated copies, fills and text, shadow pushes and refreshes. `Option "Debug"` also logs GC ops-table state and adds timings to it (a syscall per reading on m68k, so only then).
+
 ### CF card (`cfcard/`)
 - `cfcard/make-cf.sh [--image-only] [--verify] diskN` runs on the macOS host:
   - Its safety checks refuse internal, non-whole, non-removable, boot, APFS-store and >256 GB disks.
@@ -89,7 +102,7 @@ The drivers target Warp firmware package **3.000+** (the state before this rewor
 - `buildroot_2024.05/package/x11vnc/0003-Fix-mutex-declarations.patch` goes into Buildroot's `package/x11vnc/` (next to its existing patches). It turns mutex definitions in a header into `static` ones, which avoids multiple-definition link errors with modern GCC.
 
 ### Rootfs overlay (`overlay/`)
-Copied over the target rootfs by Buildroot. It contains `etc/X11/xorg.conf` (fbdev + shadow, input autodetection off), shell `.profile`s for `root` and user `andy`, and a demo web page in `var/www/`.
+Copied over the target rootfs by Buildroot. It contains `etc/X11/xorg.conf` (the `warp` driver, `Driver "fbdev"` as the fallback; input autodetection off), shell `.profile`s for `root` and user `andy`, and a demo web page in `var/www/`.
 
 ## Notes
 - This is a cross-compile target (m68k). Nothing can be run on the dev machine. Verify driver changes with `./build.sh kernel`.

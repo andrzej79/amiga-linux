@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_WARP_PATH/package/xdriver_xf86-video-warp/Config.in"

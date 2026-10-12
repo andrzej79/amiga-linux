@@ -90,7 +90,8 @@ fetch() {
     tar -xf "$tarball" -C "$WORK"
 }
 
-br_make() { make -C "$BR_SRC" O="$BR_OUT" "$@"; }
+# BR2_EXTERNAL: the Warp X driver package (br2-external/)
+br_make() { make -C "$BR_SRC" O="$BR_OUT" BR2_EXTERNAL="$REPO/br2-external" "$@"; }
 
 br_prepare() {
     log "Buildroot $BR_VERSION, config $BR_CONFIG"
