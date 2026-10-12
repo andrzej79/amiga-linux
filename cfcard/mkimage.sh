@@ -15,6 +15,7 @@
 #   LBOOT_MB    default 64
 #   SWAP_MB     default 512
 #   ROOT_DISK   Linux disk name in the boot scripts, default sda
+#   SWAP_AUTO   1 = activate the swap partition at boot (default: noauto)
 #   VIDEO       amiwarpfb mode for the boot script, default 1280x1024@60,depth:16
 #   DH0_IMAGE   saved DH0 (cfcard/save-dh0.sh), default output/cfcard/dh0.hdf.gz
 #               if it exists; "none" = empty FFS volume
@@ -128,7 +129,8 @@ Warp Linux boot partition
                                    (that one is probed first and becomes sda)
 
 Kernel: LBOOT:vmlinux  (6.9, built $(date -u +%Y-%m-%d))
-Partitions: 1 DH0, 2 LBOOT, 3 swap (label warp-swap), 4 root ext4
+Partitions: 1 DH0, 2 LBOOT, 3 swap (label warp-swap, off by default:
+            swapon LABEL=warp-swap), 4 root ext4
 Under Linux this partition can be mounted as affs, e.g. to replace the kernel:
   mount -t affs /dev/${ROOT_DISK}2 /mnt
 Kernel options: see kernel_6.9.0/WARP_DRIVERS.md in the amiga-linux repo.
@@ -160,6 +162,12 @@ EOF
 # ---------------------------------------------------------------- root
 # fakeroot keeps root ownership and device nodes from the tarball for mke2fs -d
 log "LINUX: ext4 root filesystem from $(basename "$(dirname "$ROOTFS_TAR")")/rootfs.tar"
+if [ "${SWAP_AUTO:-0}" = 1 ]; then
+    SWAP_OPTS="sw,nofail,x-systemd.device-timeout=5min"
+else
+    SWAP_OPTS="sw,noauto"
+fi
+export SWAP_OPTS
 fakeroot -- bash -euo pipefail -c '
     W=$1; ROOTFS_TAR=$2; MODULES_TGZ=$3; ROOT_DISK=$4; ROOT_BYTES=$5
     mkdir "$W/tree"
@@ -179,9 +187,13 @@ fakeroot -- bash -euo pipefail -c '
                 grep -i "fingerprint" | sed "s/^/  $t host key /"
         done
     fi
-    # by label: the card is sda or sdb depending on the A1200 IDE port
+    # by label: the card is sda or sdb depending on the A1200 IDE port.
+    # noauto: swap to the CF over PIO is slower than going without, so it is
+    # not activated by default - "swapon LABEL=warp-swap" when wanted
+    # (SWAP_AUTO=1: activate at boot; udev reaches the disks minutes into a
+    # 68k boot, hence the long timeout, and nofail keeps the boot from waiting).
     grep -q "warp-swap" "$W/tree/etc/fstab" ||
-        printf "LABEL=warp-swap\tnone\tswap\tsw,nofail,x-systemd.device-timeout=10s\t0\t0\n" >> "$W/tree/etc/fstab"
+        printf "LABEL=warp-swap\tnone\tswap\t%s\t0\t0\n" "$SWAP_OPTS" >> "$W/tree/etc/fstab"
     echo "  /etc/fstab:"; sed "s/^/    /" "$W/tree/etc/fstab"
     mke2fs -q -F -t ext4 -L warp-root -d "$W/tree" "$W/root.img" "$((ROOT_BYTES / 1024))k"
 ' _ "$W" "$ROOTFS_TAR" "$MODULES_TGZ" "$ROOT_DISK" "$ROOT_BYTES"

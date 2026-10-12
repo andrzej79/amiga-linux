@@ -52,7 +52,7 @@ if [ -z "${AMIGA_IN_CONTAINER:-}" ]; then
     exec docker run --rm ${tty[@]+"${tty[@]}"} \
         -v "$VOLUME:/work" -v "$repo:/repo" \
         -e AMIGA_IN_CONTAINER=1 -e BR_CONFIG -e JOBS \
-        -e CF_BLOCKS -e DH0_MB -e LBOOT_MB -e SWAP_MB -e ROOT_DISK -e VIDEO -e DH0_IMAGE \
+        -e CF_BLOCKS -e DH0_MB -e LBOOT_MB -e SWAP_MB -e ROOT_DISK -e VIDEO -e DH0_IMAGE -e SWAP_AUTO \
         "$IMAGE" /repo/build.sh "$@"
 fi
 
