@@ -31,6 +31,40 @@ index 20e6645..7b9b87e 100644
  obj-$(CONFIG_PATA_BUDDHA)	+= pata_buddha.o
  obj-$(CONFIG_PATA_ISAPNP)	+= pata_isapnp.o
  obj-$(CONFIG_PATA_IXP4XX_CF)	+= pata_ixp4xx_cf.o
+diff --git a/drivers/block/Kconfig b/drivers/block/Kconfig
+index 5b9d4aa..1c60231 100644
+--- a/drivers/block/Kconfig
++++ b/drivers/block/Kconfig
+@@ -82,6 +82,17 @@ config AMIGA_Z2RAM
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called z2ram.
+ 
++config BLK_DEV_CSWARP
++	tristate "CS-Lab Warp SD card and USB disks"
++	depends on MFD_CSWARP
++	help
++	  Block driver for the media behind a CS-Lab Warp turbo board's
++	  ARM: the SD card slot and up to two USB mass-storage disks
++	  plugged into the board (warpsd, warpusb0, warpusb1).  Media are
++	  polled and appear and disappear as they are inserted and removed.
++
++	  If unsure, say N.
++
+ config N64CART
+ 	bool "N64 cart support"
+ 	depends on MACH_NINTENDO64
+diff --git a/drivers/block/Makefile b/drivers/block/Makefile
+index 101612c..5ac14d1 100644
+--- a/drivers/block/Makefile
++++ b/drivers/block/Makefile
+@@ -17,6 +17,7 @@ obj-$(CONFIG_PS3_DISK)		+= ps3disk.o
+ obj-$(CONFIG_PS3_VRAM)		+= ps3vram.o
+ obj-$(CONFIG_ATARI_FLOPPY)	+= ataflop.o
+ obj-$(CONFIG_AMIGA_Z2RAM)	+= z2ram.o
++obj-$(CONFIG_BLK_DEV_CSWARP)	+= cswarp_disk.o
+ obj-$(CONFIG_N64CART)		+= n64cart.o
+ obj-$(CONFIG_BLK_DEV_RAM)	+= brd.o
+ obj-$(CONFIG_BLK_DEV_LOOP)	+= loop.o
 diff --git a/drivers/input/mouse/amimouse.c b/drivers/input/mouse/amimouse.c
 index 2fbbaeb..97488ba 100644
 --- a/drivers/input/mouse/amimouse.c

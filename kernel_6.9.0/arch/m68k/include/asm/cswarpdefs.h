@@ -119,13 +119,30 @@
 #define WARP_IRQ_CR_VBLANK_EN		BIT(0)
 #define WARP_IRQ_CR_VBLANK_CLR		BIT(1)
 
+/* ---- QSDMA engine ------------------------------------------------------- */
+/*
+ * Moves 16-byte words between the board and Warp RAM (DDR3): memAddr is the
+ * word address, A27..A4 of the Amiga address, trNumb the word count.
+ */
+#define WARP_QSDMA_CSR			(WARP_OFFSET_QSDMA + 0x00)
+#define WARP_QSDMA_MEMADDR		(WARP_OFFSET_QSDMA + 0x04)
+#define WARP_QSDMA_MODULO		(WARP_OFFSET_QSDMA + 0x08)
+#define WARP_QSDMA_MODINC		(WARP_OFFSET_QSDMA + 0x0c)
+#define WARP_QSDMA_TRNUMB		(WARP_OFFSET_QSDMA + 0x10)
+#define QSDMA_CSR_START			BIT(0)
+#define QSDMA_CSR_DIR_MTQ		BIT(1)	/* memory to board; clear: board to memory */
+#define QSDMA_CSR_TC			BIT(16)	/* FIFO empty and every memory write done */
+#define QSDMA_CSR_ERR_MASK		(BIT(17) | BIT(18) | BIT(19) | BIT(20))
+
 /* ---- SysCfg block -------------------------------------------------------- */
 /*
  * Registers above +0x04 exist only from SYSCFG_ID_L2CFG on; on older images a
- * write there is never acknowledged and hangs the bus.  Linux only reads +0x00.
+ * write there is never acknowledged and hangs the bus.  Linux reads +0x00 and
+ * writes only CCTRL (the L2 flush, around QSDMA transfers).
  */
 #define WARP_SYSCFG_ID			(WARP_OFFSET_SYSCFG + 0x00)
 #define WARP_SYSCFG_CCTRL		(WARP_OFFSET_SYSCFG + 0x04)
+#define SYSCFG_CCTRL_L2FLUSHINV		BIT(31)	/* write back and invalidate the whole L2 */
 #define SYSCFG_ID_ORIGINAL		0x01234567
 #define SYSCFG_ID_L2CFG			0x01234568
 #define SYSCFG_ID_L2STATS		0x01234569	/* oldest image with the video changes we rely on */

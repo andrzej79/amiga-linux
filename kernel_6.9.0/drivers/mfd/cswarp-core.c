@@ -17,7 +17,8 @@
  *  - board identity (FPGA DPREG id, SysCfg id, firmware version, board type,
  *    IDE mode), checked once at probe.
  *
- * Function drivers are MFD children: cswarp-net, cswarp-ata, cswarp-fb.
+ * Function drivers are MFD children: cswarp-net, cswarp-ata, cswarp-fb,
+ * cswarp-disk.
  *
  * Requires firmware package 3.000 or later (DPREG register file).
  */
@@ -29,6 +30,7 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
+#include <linux/log2.h>
 #include <linux/math64.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/cswarp.h>
@@ -44,7 +46,7 @@
 
 unsigned int cswarp_dbg_mask = CSWARP_DBG_DEFAULT;
 module_param_named(dbg, cswarp_dbg_mask, uint, 0644);
-MODULE_PARM_DESC(dbg, "Debug message mask: 0x1 core, 0x2 mbox, 0x4 irq, 0x8 net, 0x10 net-pkt, 0x20 fb, 0x40 fb-accel, 0x80 ata, 0x100 ata-io");
+MODULE_PARM_DESC(dbg, "Debug message mask: 0x1 core, 0x2 mbox, 0x4 irq, 0x8 net, 0x10 net-pkt, 0x20 fb, 0x40 fb-accel, 0x80 ata, 0x100 ata-io, 0x200 disk, 0x400 disk-io");
 EXPORT_SYMBOL_GPL(cswarp_dbg_mask);
 
 static bool use_irq = true;
@@ -86,6 +88,23 @@ static_assert(offsetof(DprRplDiagMsg, wifiState) == 364);
 static_assert(sizeof(DprRplDiagMsg) == 412);
 static_assert(sizeof(DprRplDiagMsg) <= DPR_FRAME_SIZE);
 static_assert((1 + NETTLM_WORDS) * 4 <= DPR_FRAME_SIZE);
+static_assert(offsetof(DprCmdUnitSubmit, seq) == 8);
+static_assert(offsetof(DprCmdUnitSubmit, blockAddr) == 12);
+static_assert(offsetof(DprCmdUnitSubmit, dataLen) == 20);
+static_assert(offsetof(DprCmdUnitSubmit, data) == 24);
+static_assert(sizeof(DprCmdUnitSubmit) <= DPR_FRAME_SIZE);
+static_assert(offsetof(DprCmdUnitFetch, chunk) == 10);
+static_assert(offsetof(DprCmdUnitFetch, len) == 16);
+static_assert(sizeof(DprCmdUnitCancel) == 8);
+static_assert(sizeof(DprRplUnitAck) == 12);
+static_assert(offsetof(DprRplUnitData, data) == 12);
+static_assert(offsetof(DprRplUnitCaps, chunkBytes) == 76);
+static_assert(sizeof(DprRplUnitCaps) == 140);
+static_assert(offsetof(DprRplSDGetInfoHead, state) == 6);
+static_assert(offsetof(DprRplSDGetInfoHead, blockNbr) == 14);
+static_assert(sizeof(DprRplSDGetInfoHead) == 22);
+static_assert(sizeof(DprUSBDiskUnit) == 68);
+static_assert(offsetof(DprRplUSBDiskUnits, units) == 8);
 
 /* ------------------------------------------------------------------------ */
 /* DPREG register file                                                      */
@@ -292,21 +311,16 @@ void cswarp_frame_unlock(struct cswarp_core *wc)
 }
 EXPORT_SYMBOL_GPL(cswarp_frame_unlock);
 
-int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rpl)
+int cswarp_frame_exchange_start(struct cswarp_core *wc)
 {
-	unsigned long deadline = jiffies + msecs_to_jiffies(READ_ONCE(xfer_timeout_ms));
-	ktime_t t0 = 0;
-	u32 cmd, rpl = CSWARP_RPL_ANY;
-	int err;
-
 	lockdep_assert_held(&wc->frame_lock);
 	if (wc->broken)
 		return -EIO;
 
-	cmd = z_readl(cswarp_frame(wc));
-	wc->last_cmd = cmd;
+	wc->xfer_deadline = jiffies + msecs_to_jiffies(READ_ONCE(xfer_timeout_ms));
+	wc->last_cmd = z_readl(cswarp_frame(wc));
 	wc->stats.exchanges++;
-	t0 = ktime_get();
+	wc->xfer_t0 = ktime_get();
 
 	/* stale handshake bits would end the waits below at once */
 	dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_CLR | DPREG_CR_MR_ARM | DPREG_CR_MP_68K);
@@ -317,6 +331,20 @@ int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rp
 		    (wc->use_irq ? DPREG_CR_IE_68K : 0));
 	/* ring the ARM */
 	dpreg_write(wc, DPREG_IDX_CR, DPREG_CR_SET | DPREG_CR_MP_ARM);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cswarp_frame_exchange_start);
+
+int cswarp_frame_exchange_finish(struct cswarp_core *wc, bool want_reply, u32 expect_rpl)
+{
+	unsigned long deadline = wc->xfer_deadline;
+	ktime_t t0 = wc->xfer_t0;
+	u32 cmd = wc->last_cmd, rpl = CSWARP_RPL_ANY;
+	int err;
+
+	lockdep_assert_held(&wc->frame_lock);
+	if (wc->broken)
+		return -EIO;
 
 	err = cswarp_wait_flag(wc, &wc->frame_mr, DPREG_CR_MR_ARM, deadline);
 	if (!err && want_reply)
@@ -362,6 +390,14 @@ int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rp
 			 want_reply ? (int)rpl : -1,
 			 ktime_us_delta(ktime_get(), t0));
 	return 0;
+}
+EXPORT_SYMBOL_GPL(cswarp_frame_exchange_finish);
+
+int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rpl)
+{
+	int err = cswarp_frame_exchange_start(wc);
+
+	return err ? err : cswarp_frame_exchange_finish(wc, want_reply, expect_rpl);
 }
 EXPORT_SYMBOL_GPL(cswarp_frame_exchange);
 
@@ -506,6 +542,10 @@ static int cswarp_read_diag(struct cswarp_core *wc)
 	wc->ide_timing[4] = diag->IDE_ACK_as;
 	strscpy(wc->board_name, diag->boardName, sizeof(wc->board_name));
 	wc->wifi_channel = diag->wifiChannel <= 14 ? diag->wifiChannel : 0;
+	/* QSDMA buffers must own whole L2 lines; assume 128 B if not told */
+	wc->l2_line = diag->l2CacheLineBytes;
+	if (wc->l2_line < 16 || wc->l2_line > 4096 || !is_power_of_2(wc->l2_line))
+		wc->l2_line = 128;
 
 	cswarp_fw_ver_str(wc->fw_ver, ver, sizeof(ver));
 	dev_info(wc->dev, "%s (type %u: %s), hw 0x%x, firmware %s (0x%04x), IDE %s\n",
@@ -642,6 +682,7 @@ static const struct mfd_cell cswarp_cells[] = {
 	{ .name = "cswarp-net" },
 	{ .name = "cswarp-ata" },
 	{ .name = "cswarp-fb" },
+	{ .name = "cswarp-disk" },
 };
 
 static int cswarp_probe(struct zorro_dev *z, const struct zorro_device_id *ent)
@@ -736,7 +777,7 @@ static int cswarp_probe(struct zorro_dev *z, const struct zorro_device_id *ent)
 		dev_err(wc->dev, "cannot add function devices (%d)\n", err);
 		goto err_irq;
 	}
-	cswarp_dbg(CSWARP_DBG_CORE, wc->dev, "function devices added: net, ata, fb\n");
+	cswarp_dbg(CSWARP_DBG_CORE, wc->dev, "function devices added: net, ata, fb, disk\n");
 	return 0;
 
 err_irq:

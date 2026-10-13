@@ -5,7 +5,7 @@
  * cswarp-core owns the Warp CTRL Zorro board: the register window, the one
  * 4 KB dual-port RAM command/reply frame shared with the board's ARM, and the
  * INT2 (IRQ_AMIGA_PORTS) handler.  The function drivers (cswarp-net,
- * cswarp-ata, cswarp-fb) are MFD children and reach the hardware only through
+ * cswarp-ata, cswarp-fb, cswarp-disk) are MFD children and reach the hardware only through
  * the helpers below - the Linux counterpart of cswarp.library.
  */
 #ifndef _LINUX_MFD_CSWARP_H
@@ -37,8 +37,11 @@
 #define CSWARP_DBG_FBACC	BIT(6)	/* every blitter operation (very noisy) */
 #define CSWARP_DBG_ATA		BIT(7)	/* IDE probe and setup */
 #define CSWARP_DBG_ATAIO	BIT(8)	/* every PIO data transfer (very noisy) */
+#define CSWARP_DBG_DISK		BIT(9)	/* SD/USB disks: caps, media changes, errors */
+#define CSWARP_DBG_DISKIO	BIT(10)	/* every disk request and unit wait (very noisy) */
 
-#define CSWARP_DBG_DEFAULT	(CSWARP_DBG_CORE | CSWARP_DBG_NET | CSWARP_DBG_FB | CSWARP_DBG_ATA)
+#define CSWARP_DBG_DEFAULT	(CSWARP_DBG_CORE | CSWARP_DBG_NET | CSWARP_DBG_FB | CSWARP_DBG_ATA | \
+				 CSWARP_DBG_DISK)
 
 extern unsigned int cswarp_dbg_mask;
 
@@ -90,6 +93,7 @@ struct cswarp_core {
 	bool native_ide;
 	u8 wifi_channel;		/* 2.4 GHz channel at probe, 0 = unknown/not connected */
 	u8 ide_timing[5];		/* IOR as/ng, IOW as/ng, ACK as */
+	u32 l2_line;			/* L2 cache line bytes (power of two) */
 
 	/* the command/reply frame */
 	struct mutex frame_lock;
@@ -98,6 +102,8 @@ struct cswarp_core {
 	int frame_mp;			/* set by the irq: reply is in the frame */
 	bool broken;			/* an exchange timed out: frame unusable */
 	u32 last_cmd;
+	unsigned long xfer_deadline;	/* of the exchange in flight */
+	ktime_t xfer_t0;
 
 	/* async unit doorbells */
 	spinlock_t unit_lock;
@@ -125,6 +131,41 @@ static inline void cswarp_writel(struct cswarp_core *wc, u32 val, unsigned long 
 	z_writel(val, wc->base + off);
 }
 
+/* Async unit n's UNIT_STATUS / UNIT_COUNT words (written by the ARM only) */
+static inline u32 cswarp_unit_status(struct cswarp_core *wc, unsigned int unit)
+{
+	return cswarp_readl(wc, WARP_OFFSET_DPREG_CR + 4 * DPREG_IDX_UNIT_STATUS(unit));
+}
+
+static inline u32 cswarp_unit_count(struct cswarp_core *wc, unsigned int unit)
+{
+	return cswarp_readl(wc, WARP_OFFSET_DPREG_CR + 4 * DPREG_IDX_UNIT_COUNT(unit));
+}
+
+/*
+ * QSDMA engine.  One engine for every user: arm it only while holding the
+ * frame, for the exchange that makes the board feed or drain it.
+ */
+static inline void cswarp_qsdma_arm(struct cswarp_core *wc, u32 word, u32 words, bool to_board)
+{
+	cswarp_writel(wc, word, WARP_QSDMA_MEMADDR);
+	cswarp_writel(wc, words, WARP_QSDMA_TRNUMB);
+	cswarp_writel(wc, 0, WARP_QSDMA_MODULO);
+	cswarp_writel(wc, 0, WARP_QSDMA_MODINC);
+	cswarp_writel(wc, QSDMA_CSR_START | (to_board ? QSDMA_CSR_DIR_MTQ : 0), WARP_QSDMA_CSR);
+}
+
+static inline u32 cswarp_qsdma_csr(struct cswarp_core *wc)
+{
+	return cswarp_readl(wc, WARP_QSDMA_CSR);
+}
+
+/* Write back and invalidate the board's L2 cache (QSDMA bypasses it) */
+static inline void cswarp_l2_flush(struct cswarp_core *wc)
+{
+	cswarp_writel(wc, SYSCFG_CCTRL_L2FLUSHINV, WARP_SYSCFG_CCTRL);
+}
+
 static inline void __iomem *cswarp_frame(struct cswarp_core *wc)
 {
 	return wc->base + WARP_OFFSET_DPRAM;
@@ -147,9 +188,16 @@ static inline bool cswarp_fw_at_least(struct cswarp_core *wc, u32 ver)
  * Without want_reply the exchange returns once the ARM has taken the command
  * (MR); the frame is then free again.  With it, it also waits for the reply
  * (MP) and checks its type against expect_rpl (CSWARP_RPL_ANY: no check).
+ *
+ * An exchange may also be split: cswarp_frame_exchange_start() rings the ARM
+ * and returns at once, so the caller can work while the ARM serves it (say,
+ * copy out the previous QSDMA buffer), then cswarp_frame_exchange_finish()
+ * waits as cswarp_frame_exchange() would.  The frame stays locked meanwhile.
  */
 void __iomem *cswarp_frame_lock(struct cswarp_core *wc);
 int cswarp_frame_exchange(struct cswarp_core *wc, bool want_reply, u32 expect_rpl);
+int cswarp_frame_exchange_start(struct cswarp_core *wc);
+int cswarp_frame_exchange_finish(struct cswarp_core *wc, bool want_reply, u32 expect_rpl);
 void cswarp_frame_unlock(struct cswarp_core *wc);
 
 /* Copy cmd in, exchange, copy rlen bytes of the reply out (rpl may be NULL). */
