@@ -113,6 +113,391 @@ index 0d872d4..e7492d4 100644
  obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
  obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
 +obj-$(CONFIG_AMIWARPNET) += amiwarpnet.o
+diff --git a/drivers/usb/isp1760/isp1760-core.c b/drivers/usb/isp1760/isp1760-core.c
+index af88f4f..a1f5b35 100644
+--- a/drivers/usb/isp1760/isp1760-core.c
++++ b/drivers/usb/isp1760/isp1760-core.c
+@@ -485,6 +485,7 @@ int isp1760_register(struct resource *mem, int irq, unsigned long irqflags,
+ 	const struct reg_field *hc_reg_fields;
+ 	const struct regmap_config *dc_regmap;
+ 	const struct reg_field *dc_reg_fields;
++	struct regmap_config hc_conf, dc_conf;
+ 	struct isp1760_device *isp;
+ 	struct isp1760_hcd *hcd;
+ 	struct isp1760_udc *udc;
+@@ -533,6 +534,23 @@ int isp1760_register(struct resource *mem, int irq, unsigned long irqflags,
+ 		dc_reg_fields = &isp1761_dc_reg_fields[0];
+ 	}
+ 
++	/*
++	 * A 32-bit bus wired straight to a big-endian CPU: the chip's 32-bit
++	 * registers read and write in CPU byte order.
++	 */
++	hc_conf = *hc_regmap;
++	dc_conf = *dc_regmap;
++	if (devflags & ISP1760_FLAG_BIG_ENDIAN_BUS) {
++		if (hcd->is_isp1763 ||
++		    (devflags & (ISP1760_FLAG_BUS_WIDTH_16 | ISP1760_FLAG_BUS_WIDTH_8))) {
++			dev_err(dev, "big-endian bus: isp1760/61 on a 32-bit bus only\n");
++			return -EINVAL;
++		}
++		hc_conf.val_format_endian = REGMAP_ENDIAN_BIG;
++		dc_conf.val_format_endian = REGMAP_ENDIAN_BIG;
++		hcd->bus_be = true;
++	}
++
+ 	isp->rst_gpio = devm_gpiod_get_optional(dev, NULL, GPIOD_OUT_HIGH);
+ 	if (IS_ERR(isp->rst_gpio))
+ 		return PTR_ERR(isp->rst_gpio);
+@@ -541,7 +559,7 @@ int isp1760_register(struct resource *mem, int irq, unsigned long irqflags,
+ 	if (IS_ERR(hcd->base))
+ 		return PTR_ERR(hcd->base);
+ 
+-	hcd->regs = devm_regmap_init_mmio(dev, hcd->base, hc_regmap);
++	hcd->regs = devm_regmap_init_mmio(dev, hcd->base, &hc_conf);
+ 	if (IS_ERR(hcd->regs))
+ 		return PTR_ERR(hcd->regs);
+ 
+@@ -553,7 +571,7 @@ int isp1760_register(struct resource *mem, int irq, unsigned long irqflags,
+ 		hcd->fields[i] = f;
+ 	}
+ 
+-	udc->regs = devm_regmap_init_mmio(dev, hcd->base, dc_regmap);
++	udc->regs = devm_regmap_init_mmio(dev, hcd->base, &dc_conf);
+ 	if (IS_ERR(udc->regs))
+ 		return PTR_ERR(udc->regs);
+ 
+diff --git a/drivers/usb/isp1760/isp1760-core.h b/drivers/usb/isp1760/isp1760-core.h
+index 91e0ee3..3598978 100644
+--- a/drivers/usb/isp1760/isp1760-core.h
++++ b/drivers/usb/isp1760/isp1760-core.h
+@@ -39,6 +39,7 @@ struct gpio_desc;
+ #define ISP1760_FLAG_INTR_EDGE_TRIG	0x00000100 /* Interrupt edge triggered */
+ #define ISP1760_FLAG_ISP1763		0x00000200 /* Chip is ISP1763 */
+ #define ISP1760_FLAG_BUS_WIDTH_8	0x00000400 /* 8-bit data bus width */
++#define ISP1760_FLAG_BIG_ENDIAN_BUS	0x00000800 /* 32-bit bus wired straight to a big-endian CPU */
+ 
+ struct isp1760_device {
+ 	struct device *dev;
+diff --git a/drivers/usb/isp1760/isp1760-hcd.c b/drivers/usb/isp1760/isp1760-hcd.c
+index 0e5e4cb..9719bd6 100644
+--- a/drivers/usb/isp1760/isp1760-hcd.c
++++ b/drivers/usb/isp1760/isp1760-hcd.c
+@@ -46,6 +46,24 @@ static inline struct isp1760_hcd *hcd_to_priv(struct usb_hcd *hcd)
+ 	return *(struct isp1760_hcd **)hcd->hcd_priv;
+ }
+ 
++/*
++ * 32-bit values in chip memory (PTDs): little-endian, except on a 32-bit bus
++ * wired straight to a big-endian CPU (bus_be), where they arrive in CPU byte
++ * order.  Payload is moved raw either way (verified on the FreeWay Triton).
++ */
++static inline u32 isp1760_val_read(bool be, void __iomem *addr)
++{
++	return be ? __raw_readl(addr) : readl_relaxed(addr);
++}
++
++static inline void isp1760_val_write(bool be, u32 val, void __iomem *addr)
++{
++	if (be)
++		__raw_writel(val, addr);
++	else
++		writel_relaxed(val, addr);
++}
++
+ #define dw_to_le32(x)	(cpu_to_le32((__force u32)x))
+ #define le32_to_dw(x)	((__force __dw)(le32_to_cpu(x)))
+ 
+@@ -214,12 +232,14 @@ static void isp1760_hcd_portsc1_set_clear(struct isp1760_hcd *priv, u32 field,
+ 	u32 bit = isp176x_hc_portsc1_fields[field];
+ 	u16 portsc1_reg = priv->is_isp1763 ? ISP1763_HC_PORTSC1 :
+ 		ISP176x_HC_PORTSC1;
+-	u32 port_status = readl(priv->base + portsc1_reg);
++	void __iomem *addr = priv->base + portsc1_reg;
++	u32 port_status = priv->bus_be ? __raw_readl(addr) : readl(addr);
+ 
+-	if (val)
+-		writel(port_status | bit, priv->base + portsc1_reg);
++	port_status = val ? port_status | bit : port_status & ~bit;
++	if (priv->bus_be)
++		__raw_writel(port_status, addr);
+ 	else
+-		writel(port_status & ~bit, priv->base + portsc1_reg);
++		writel(port_status, addr);
+ }
+ 
+ static void isp1760_hcd_write(struct usb_hcd *hcd, u32 field, u32 val)
+@@ -317,7 +337,7 @@ static u32 isp1760_hcd_n_ports(struct usb_hcd *hcd)
+  * doesn't quite work because some people have to enforce 32-bit access
+  */
+ static void bank_reads8(void __iomem *src_base, u32 src_offset, u32 bank_addr,
+-							__u32 *dst, u32 bytes)
++			__u32 *dst, u32 bytes, bool be)
+ {
+ 	__u32 __iomem *src;
+ 	u32 val;
+@@ -328,7 +348,7 @@ static void bank_reads8(void __iomem *src_base, u32 src_offset, u32 bank_addr,
+ 
+ 	if (src_offset < PAYLOAD_OFFSET) {
+ 		while (bytes >= 4) {
+-			*dst = readl_relaxed(src);
++			*dst = isp1760_val_read(be, src);
+ 			bytes -= 4;
+ 			src++;
+ 			dst++;
+@@ -349,7 +369,7 @@ static void bank_reads8(void __iomem *src_base, u32 src_offset, u32 bank_addr,
+ 	 * allocated.
+ 	 */
+ 	if (src_offset < PAYLOAD_OFFSET)
+-		val = readl_relaxed(src);
++		val = isp1760_val_read(be, src);
+ 	else
+ 		val = __raw_readl(src);
+ 
+@@ -371,7 +391,7 @@ static void isp1760_mem_read(struct usb_hcd *hcd, u32 src_offset, void *dst,
+ 	isp1760_reg_write(priv->regs, ISP176x_HC_MEMORY, src_offset);
+ 	ndelay(100);
+ 
+-	bank_reads8(priv->base, src_offset, ISP_BANK_0, dst, bytes);
++	bank_reads8(priv->base, src_offset, ISP_BANK_0, dst, bytes, priv->bus_be);
+ }
+ 
+ /*
+@@ -414,7 +434,7 @@ static void mem_read(struct usb_hcd *hcd, u32 src_offset, __u32 *dst,
+ }
+ 
+ static void isp1760_mem_write(void __iomem *dst_base, u32 dst_offset,
+-			      __u32 const *src, u32 bytes)
++			      __u32 const *src, u32 bytes, bool be)
+ {
+ 	__u32 __iomem *dst;
+ 
+@@ -422,7 +442,7 @@ static void isp1760_mem_write(void __iomem *dst_base, u32 dst_offset,
+ 
+ 	if (dst_offset < PAYLOAD_OFFSET) {
+ 		while (bytes >= 4) {
+-			writel_relaxed(*src, dst);
++			isp1760_val_write(be, *src, dst);
+ 			bytes -= 4;
+ 			src++;
+ 			dst++;
+@@ -443,7 +463,7 @@ static void isp1760_mem_write(void __iomem *dst_base, u32 dst_offset,
+ 	 */
+ 
+ 	if (dst_offset < PAYLOAD_OFFSET)
+-		writel_relaxed(*src, dst);
++		isp1760_val_write(be, *src, dst);
+ 	else
+ 		__raw_writel(*src, dst);
+ }
+@@ -481,7 +501,8 @@ static void mem_write(struct usb_hcd *hcd, u32 dst_offset, __u32 *src,
+ 	struct isp1760_hcd *priv = hcd_to_priv(hcd);
+ 
+ 	if (!priv->is_isp1763)
+-		return isp1760_mem_write(priv->base, dst_offset, src, bytes);
++		return isp1760_mem_write(priv->base, dst_offset, src, bytes,
++					 priv->bus_be);
+ 
+ 	isp1763_mem_write(hcd, dst_offset, (u16 *)src, bytes);
+ }
+@@ -500,7 +521,7 @@ static void isp1760_ptd_read(struct usb_hcd *hcd, u32 ptd_offset, u32 slot,
+ 	ndelay(90);
+ 
+ 	bank_reads8(priv->base, src_offset, ISP_BANK_0, (void *)ptd,
+-		    sizeof(*ptd));
++		    sizeof(*ptd), priv->bus_be);
+ }
+ 
+ static void isp1763_ptd_read(struct usb_hcd *hcd, u32 ptd_offset, u32 slot,
+@@ -552,7 +573,7 @@ static void isp1763_ptd_write(struct usb_hcd *hcd, u32 ptd_offset, u32 slot,
+ }
+ 
+ static void isp1760_ptd_write(void __iomem *base, u32 ptd_offset, u32 slot,
+-			      struct ptd *ptd)
++			      struct ptd *ptd, bool be)
+ {
+ 	u32 dst_offset = ptd_offset + slot * sizeof(*ptd);
+ 
+@@ -561,10 +582,10 @@ static void isp1760_ptd_write(void __iomem *base, u32 ptd_offset, u32 slot,
+ 	 *  since it contains the enable bit
+ 	 */
+ 	isp1760_mem_write(base, dst_offset + sizeof(ptd->dw0),
+-			  (__force u32 *)&ptd->dw1, 7 * sizeof(ptd->dw1));
++			  (__force u32 *)&ptd->dw1, 7 * sizeof(ptd->dw1), be);
+ 	wmb();
+ 	isp1760_mem_write(base, dst_offset, (__force u32 *)&ptd->dw0,
+-			  sizeof(ptd->dw0));
++			  sizeof(ptd->dw0), be);
+ }
+ 
+ static void ptd_write(struct usb_hcd *hcd, u32 ptd_offset, u32 slot,
+@@ -573,7 +594,8 @@ static void ptd_write(struct usb_hcd *hcd, u32 ptd_offset, u32 slot,
+ 	struct isp1760_hcd *priv = hcd_to_priv(hcd);
+ 
+ 	if (!priv->is_isp1763)
+-		return isp1760_ptd_write(priv->base, ptd_offset, slot, ptd);
++		return isp1760_ptd_write(priv->base, ptd_offset, slot, ptd,
++					 priv->bus_be);
+ 
+ 	isp1763_ptd_write(hcd, ptd_offset, slot, ptd);
+ }
+diff --git a/drivers/usb/isp1760/isp1760-hcd.h b/drivers/usb/isp1760/isp1760-hcd.h
+index ee3063a..bf59cea 100644
+--- a/drivers/usb/isp1760/isp1760-hcd.h
++++ b/drivers/usb/isp1760/isp1760-hcd.h
+@@ -53,6 +53,7 @@ struct isp1760_hcd {
+ 	struct regmap_field	*fields[HC_FIELD_MAX];
+ 
+ 	bool			is_isp1763;
++	bool			bus_be;	/* ISP1760_FLAG_BIG_ENDIAN_BUS */
+ 	const struct isp1760_memory_layout	*memory_layout;
+ 
+ 	spinlock_t		lock;
+diff --git a/drivers/usb/isp1760/isp1760-if.c b/drivers/usb/isp1760/isp1760-if.c
+index fe1e398..afbad69 100644
+--- a/drivers/usb/isp1760/isp1760-if.c
++++ b/drivers/usb/isp1760/isp1760-if.c
+@@ -5,6 +5,7 @@
+  * - OpenFirmware
+  * - PCI
+  * - PDEV (generic platform device centralized driver model)
++ * - Zorro III (Matthias Hampel FreeWay Triton)
+  *
+  * (c) 2007 Sebastian Siewior <bigeasy@linutronix.de>
+  * Copyright 2021 Linaro, Rui Miguel Silva <rui.silva@linaro.org>
+@@ -28,6 +29,13 @@
+ #include <linux/pci.h>
+ #endif
+ 
++#ifdef CONFIG_ZORRO
++#include <linux/delay.h>
++#include <linux/sizes.h>
++#include <linux/zorro.h>
++#include <asm/amigaints.h>
++#endif
++
+ #ifdef CONFIG_USB_PCI
+ static int isp1761_pci_init(struct pci_dev *dev)
+ {
+@@ -270,6 +278,96 @@ static struct platform_driver isp1760_plat_driver = {
+ 	},
+ };
+ 
++#ifdef CONFIG_ZORRO
++/*
++ * FreeWay Triton: the ISP1760 sits 1 MB into the Zorro III board, on a 32-bit
++ * bus wired straight to the 68k (big-endian).  Its interrupt reaches INT6
++ * inverted, so the chip drives it active-high.  Two board registers, used as
++ * the AmigaOS driver (freewaytritonz3usb.device 1.01) uses them:
++ *  +0xE0000: bit 2 pulses the chip's reset; bit 1 (with bit 1 of +0xC0000)
++ *            lets its interrupt through to INT6.
++ */
++#define TRITON_ISP1760_OFFSET	SZ_1M
++#define TRITON_ISP1760_SIZE	SZ_64K
++#define TRITON_CTRL_C		0xc0000
++#define TRITON_CTRL_E		0xe0000
++#define TRITON_CTRL_E_RESET	BIT(2)
++#define TRITON_CTRL_IRQ_EN	BIT(1)
++
++static void triton_ctrl_write(struct zorro_dev *z, unsigned long reg, u32 val)
++{
++	void __iomem *p = ioremap(zorro_resource_start(z) + reg, 4);
++
++	if (p) {
++		z_writel(val, p);
++		iounmap(p);
++	}
++}
++
++static int isp1760_zorro_int = 6;
++module_param_named(zorro_int, isp1760_zorro_int, int, 0444);
++MODULE_PARM_DESC(zorro_int, "Amiga interrupt level of Zorro boards: 6 (default) or 2");
++
++static int isp1760_zorro_probe(struct zorro_dev *z,
++			       const struct zorro_device_id *ent)
++{
++	struct resource *mem;
++	int irq, ret;
++
++	if (isp1760_zorro_int != 2 && isp1760_zorro_int != 6) {
++		dev_err(&z->dev, "zorro_int=%d: must be 2 or 6\n", isp1760_zorro_int);
++		return -EINVAL;
++	}
++	irq = isp1760_zorro_int == 6 ? IRQ_AMIGA_EXTER : IRQ_AMIGA_PORTS;
++
++	mem = devm_kzalloc(&z->dev, sizeof(*mem), GFP_KERNEL);
++	if (!mem)
++		return -ENOMEM;
++	mem->name = "isp1760";
++	mem->start = zorro_resource_start(z) + TRITON_ISP1760_OFFSET;
++	mem->end = mem->start + TRITON_ISP1760_SIZE - 1;
++	mem->flags = IORESOURCE_MEM;
++
++	dev_info(&z->dev, "FreeWay Triton: ISP1760 at %pR, INT%d\n", mem,
++		 isp1760_zorro_int);
++
++	/* hardware reset of the chip, interrupt gate closed */
++	triton_ctrl_write(z, TRITON_CTRL_E, TRITON_CTRL_E_RESET);
++	msleep(1);
++	triton_ctrl_write(z, TRITON_CTRL_E, 0);
++	msleep(5);
++
++	ret = isp1760_register(mem, irq, 0, &z->dev,
++			       ISP1760_FLAG_BIG_ENDIAN_BUS | ISP1760_FLAG_INTR_POL_HIGH);
++	if (ret)
++		return ret;
++
++	/* the handler is in place: let the chip's interrupt through */
++	triton_ctrl_write(z, TRITON_CTRL_C, TRITON_CTRL_IRQ_EN);
++	triton_ctrl_write(z, TRITON_CTRL_E, TRITON_CTRL_IRQ_EN);
++	return 0;
++}
++
++static void isp1760_zorro_remove(struct zorro_dev *z)
++{
++	triton_ctrl_write(z, TRITON_CTRL_E, 0);
++	isp1760_unregister(&z->dev);
++}
++
++static const struct zorro_device_id isp1760_zorro_ids[] = {
++	{ ZORRO_PROD_MATTHIAS_HAMPEL_FREEWAY_TRITON },
++	{ 0 }
++};
++MODULE_DEVICE_TABLE(zorro, isp1760_zorro_ids);
++
++static struct zorro_driver isp1760_zorro_driver = {
++	.name		= "isp1760-zorro",
++	.id_table	= isp1760_zorro_ids,
++	.probe		= isp1760_zorro_probe,
++	.remove		= isp1760_zorro_remove,
++};
++#endif
++
+ static int __init isp1760_init(void)
+ {
+ 	int ret, any_ret = -ENODEV;
+@@ -284,6 +382,11 @@ static int __init isp1760_init(void)
+ 	if (!ret)
+ 		any_ret = 0;
+ #endif
++#ifdef CONFIG_ZORRO
++	ret = zorro_register_driver(&isp1760_zorro_driver);
++	if (!ret)
++		any_ret = 0;
++#endif
+ 
+ 	if (any_ret)
+ 		isp1760_deinit_kmem_cache();
+@@ -296,6 +399,9 @@ static void __exit isp1760_exit(void)
+ 	platform_driver_unregister(&isp1760_plat_driver);
+ #ifdef CONFIG_USB_PCI
+ 	pci_unregister_driver(&isp1761_pci_driver);
++#endif
++#ifdef CONFIG_ZORRO
++	zorro_unregister_driver(&isp1760_zorro_driver);
+ #endif
+ 	isp1760_deinit_kmem_cache();
+ }
 diff --git a/drivers/video/fbdev/Kconfig b/drivers/video/fbdev/Kconfig
 index 197b6d5..276df3f 100644
 --- a/drivers/video/fbdev/Kconfig
@@ -197,10 +582,10 @@ index 305f396..270a283 100644
  		goto release;
  	}
 diff --git a/drivers/zorro/zorro.ids b/drivers/zorro/zorro.ids
-index 119abea..33418af 100644
+index 119abea..9def664 100644
 --- a/drivers/zorro/zorro.ids
 +++ b/drivers/zorro/zorro.ids
-@@ -400,6 +400,11 @@
+@@ -400,6 +400,13 @@
  	0100  ISDN Blaster Z2 [ISDN Interface]
  	0200  HyperCom 4 [Multi I/O]
  	0600  HyperCom 4+ [Multi I/O]
@@ -209,14 +594,16 @@ index 119abea..33418af 100644
 +	0001  Warp Video Memory
 +	0101  Warp Control Registers
 +	0201  Warp Flash ROM
++1447  Matthias Hampel
++	1e00  FreeWay Triton [USB 2.0 Interface]
  157c  Information
  	6400  ISDN Engine I [ISDN Interface]
  2017  Vortex
 diff --git a/include/uapi/linux/zorro_ids.h b/include/uapi/linux/zorro_ids.h
-index 6e574d7..e293ff5 100644
+index 6e574d7..5cdae6d 100644
 --- a/include/uapi/linux/zorro_ids.h
 +++ b/include/uapi/linux/zorro_ids.h
-@@ -449,6 +449,12 @@
+@@ -449,6 +449,15 @@
  #define  ZORRO_PROD_VMC_ISDN_BLASTER_Z2				ZORRO_ID(VMC, 0x01, 0)
  #define  ZORRO_PROD_VMC_HYPERCOM_4				ZORRO_ID(VMC, 0x02, 0)
  
@@ -225,6 +612,9 @@ index 6e574d7..e293ff5 100644
 +#define ZORRO_PROD_CSLAB_WARP_VRAM          ZORRO_ID(CSLAB, 0x64, 0)
 +#define ZORRO_PROD_CSLAB_WARP_CTRL          ZORRO_ID(CSLAB, 0x65, 0)
 +#define ZORRO_PROD_CSLAB_WARP_XROM          ZORRO_ID(CSLAB, 0x66, 0)
++
++#define ZORRO_MANUF_MATTHIAS_HAMPEL				0x1447
++#define  ZORRO_PROD_MATTHIAS_HAMPEL_FREEWAY_TRITON		ZORRO_ID(MATTHIAS_HAMPEL, 0x1E, 0)
 +
  #define ZORRO_MANUF_INFORMATION					0x157C
  #define  ZORRO_PROD_INFORMATION_ISDN_ENGINE_I			ZORRO_ID(INFORMATION, 0x64, 0)
