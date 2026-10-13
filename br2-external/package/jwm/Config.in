@@ -1,0 +1,18 @@
+config BR2_PACKAGE_JWM
+	bool "jwm"
+	depends on BR2_PACKAGE_XORG7
+	select BR2_PACKAGE_XLIB_LIBX11
+	select BR2_PACKAGE_XLIB_LIBXEXT
+	select BR2_PACKAGE_XLIB_LIBXINERAMA
+	select BR2_PACKAGE_XLIB_LIBXMU
+	select BR2_PACKAGE_XLIB_LIBXPM
+	select BR2_PACKAGE_LIBPNG
+	help
+	  JWM (Joe's Window Manager): a light window manager with a
+	  taskbar, start menu, pager, tray and clock in one process.
+
+	  Built with core X fonts only (no Xft, Pango, Cairo, RSVG or
+	  XRender), so its text goes through the X server's core font
+	  path, which the Warp X driver accelerates.
+
+	  https://joewing.net/projects/jwm/

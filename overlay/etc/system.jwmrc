@@ -1,0 +1,169 @@
+<?xml version="1.0"?>
+<!--
+  JWM for the Warp: core X fonts (the X driver blits their text), flat
+  decorations, a solid background (one blitter fill) and nothing animated.
+  Per-user copy: ~/.jwmrc.  Start with: startx /usr/bin/jwm
+-->
+<JWM>
+
+    <RootMenu onroot="13" label="Menu">
+        <Program label="Terminal">xterm</Program>
+        <Program label="File manager (mc)">xterm -T mc -e mc</Program>
+        <Program label="Process viewer (htop)">xterm -T htop -e htop</Program>
+        <Separator/>
+        <Menu label="Applications">
+            <Program label="Text editor">xedit</Program>
+            <Program label="Calculator">xcalc</Program>
+            <Program label="Clock">xclock</Program>
+            <Program label="Load meter">xload</Program>
+        </Menu>
+        <Menu label="Toys">
+            <Program label="Eyes">xeyes</Program>
+            <Program label="X logo">xlogo</Program>
+        </Menu>
+        <Separator/>
+        <Restart label="Restart JWM"/>
+        <Exit label="Exit X" confirm="true"/>
+    </RootMenu>
+
+    <RootMenu onroot="2">
+        <Program label="Terminal">xterm</Program>
+        <Program label="Kill a window">xkill</Program>
+    </RootMenu>
+
+    <Group>
+        <Name>xclock</Name>
+        <Option>notitle</Option>
+        <Option>nolist</Option>
+    </Group>
+
+    <Tray x="0" y="-1" height="24" autohide="off">
+        <TrayButton label="Menu">root:1</TrayButton>
+        <Spacer width="4"/>
+        <Pager labeled="true"/>
+        <Spacer width="4"/>
+        <TaskList maxwidth="220"/>
+        <Dock/>
+        <Clock format="%H:%M"><Button mask="1">exec:xclock</Button></Clock>
+    </Tray>
+
+    <WindowStyle decorations="flat">
+        <Font>-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1</Font>
+        <Width>3</Width>
+        <Height>20</Height>
+        <Corner>0</Corner>
+        <Foreground>#C0C0C0</Foreground>
+        <Background>#505860</Background>
+        <Outline>#202020</Outline>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#3060A0</Background>
+            <Outline>#101010</Outline>
+        </Active>
+    </WindowStyle>
+
+    <TrayStyle decorations="flat">
+        <Font>-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1</Font>
+        <Foreground>#FFFFFF</Foreground>
+        <Background>#303438</Background>
+    </TrayStyle>
+
+    <TaskListStyle list="desktop" group="false">
+        <Font>-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1</Font>
+        <Foreground>#D0D0D0</Foreground>
+        <Background>#303438</Background>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#3060A0</Background>
+        </Active>
+        <Minimized>
+            <Foreground>#909090</Foreground>
+            <Background>#202428</Background>
+        </Minimized>
+    </TaskListStyle>
+
+    <PagerStyle>
+        <Font>-adobe-helvetica-medium-r-normal--10-*-*-*-*-*-iso8859-1</Font>
+        <Foreground>#505860</Foreground>
+        <Background>#303438</Background>
+        <Text>#FFFFFF</Text>
+        <Active>
+            <Foreground>#3060A0</Foreground>
+            <Background>#204070</Background>
+        </Active>
+    </PagerStyle>
+
+    <MenuStyle decorations="flat">
+        <Font>-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1</Font>
+        <Foreground>#000000</Foreground>
+        <Background>#D8D8D8</Background>
+        <Outline>#404040</Outline>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#3060A0</Background>
+        </Active>
+    </MenuStyle>
+
+    <PopupStyle delay="800">
+        <Font>-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1</Font>
+        <Foreground>#000000</Foreground>
+        <Background>#FFFFE0</Background>
+    </PopupStyle>
+
+    <Desktops width="2" height="1">
+        <Background type="solid">#406080</Background>
+    </Desktops>
+
+    <DoubleClickSpeed>400</DoubleClickSpeed>
+    <DoubleClickDelta>3</DoubleClickDelta>
+    <FocusModel>click</FocusModel>
+    <SnapMode distance="8">border</SnapMode>
+    <!-- opaque moves are blitter window copies; "outline" is cheaper still -->
+    <MoveMode>opaque</MoveMode>
+    <ResizeMode>outline</ResizeMode>
+
+    <Key key="Up">up</Key>
+    <Key key="Down">down</Key>
+    <Key key="Right">right</Key>
+    <Key key="Left">left</Key>
+    <Key key="Return">select</Key>
+    <Key key="Escape">escape</Key>
+
+    <Key mask="A" key="Tab">nextstacked</Key>
+    <Key mask="A" key="F4">close</Key>
+    <Key mask="A" key="#">desktop#</Key>
+    <Key mask="A" key="F1">root:1</Key>
+    <Key mask="A" key="F2">window</Key>
+    <Key mask="A" key="F10">maximize</Key>
+    <Key mask="A" key="Right">rdesktop</Key>
+    <Key mask="A" key="Left">ldesktop</Key>
+
+    <Mouse context="root" button="4">ldesktop</Mouse>
+    <Mouse context="root" button="5">rdesktop</Mouse>
+
+    <Mouse context="title" button="1">move</Mouse>
+    <Mouse context="title" button="2">move</Mouse>
+    <Mouse context="title" button="3">window</Mouse>
+    <Mouse context="title" button="11">maximize</Mouse>
+
+    <Mouse context="icon" button="1">window</Mouse>
+    <Mouse context="icon" button="2">move</Mouse>
+    <Mouse context="icon" button="3">window</Mouse>
+
+    <Mouse context="border" button="1">resize</Mouse>
+    <Mouse context="border" button="2">move</Mouse>
+    <Mouse context="border" button="3">window</Mouse>
+
+    <Mouse context="close" button="-1">close</Mouse>
+    <Mouse context="close" button="2">move</Mouse>
+    <Mouse context="close" button="-3">close</Mouse>
+
+    <Mouse context="maximize" button="-1">maximize</Mouse>
+    <Mouse context="maximize" button="-2">maxv</Mouse>
+    <Mouse context="maximize" button="-3">maxh</Mouse>
+
+    <Mouse context="minimize" button="-1">minimize</Mouse>
+    <Mouse context="minimize" button="2">move</Mouse>
+    <Mouse context="minimize" button="-3">shade</Mouse>
+
+</JWM>
