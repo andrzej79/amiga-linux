@@ -1,0 +1,63 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] client: local games without network support
+
+A local game is run as a fake server plus the client, and the client
+learns about the game (balls, shots, score, lost balls, level end) in
+comm_recv(), which copies local_game into game via comm_recv_local().
+That copy and the handle_mods() it calls are under NETWORK_ENABLED,
+and so is the GT_LOCAL check in comm_recv().  Built with
+--disable-network the client therefore never sees the server: a fired
+ball keeps being drawn on the paddle while the real one flies, is lost
+unseen, and the level never goes on.
+
+Take the local path out of the NETWORK_ENABLED guards; only the
+packet parser and the network receive loop stay behind them.
+
+Upstream-Status: Pending
+Signed-off-by: Andrzej Rogozynski <sellen@cs-lab.eu>
+---
+--- a/client/comm.c
++++ b/client/comm.c
+@@ -63,7 +63,6 @@
+  * game and clear these entries. the current game entry must've
+  * been set to 'game'. Ball and shot updates have already been
+  * applied to the game context. */
+-#ifdef NETWORK_ENABLED
+ static void handle_mods()
+ {
+ 	BrickHit *brickhits;
+@@ -118,9 +117,6 @@
+ 	
+ 	game_reset_mods();
+ }
+-#endif
+-
+-#ifdef NETWORK_ENABLED
+ /* copy stuff from local_game to game */
+ static void comm_recv_local( void )
+ {
+@@ -183,6 +179,7 @@
+ 	return;
+ }
+ 
++#ifdef NETWORK_ENABLED
+ /* parse incoming packets and handle them according to the client's
+  * state */
+ static void comm_parse_packet()
+@@ -420,14 +417,13 @@
+  * in the current state. */
+ void comm_recv( void )
+ {
+-#ifdef NETWORK_ENABLED
+-	int recv_limit;
+-	
+ 	/* fake communication in local game */
+ 	if ( game->game_type == GT_LOCAL ) {
+ 		comm_recv_local();
+ 		return;
+ 	}
++#ifdef NETWORK_ENABLED
++	int recv_limit;
+ 	
+ 	if ( !client_is_connected ) return;
+ 

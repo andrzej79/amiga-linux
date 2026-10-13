@@ -103,6 +103,7 @@ The drivers target Warp firmware package **3.000+** (the state before this rewor
 - Paths into this repo are written as `$(AMIGA_LINUX_REPO)/...`, for example `BR2_ROOTFS_OVERLAY="$(AMIGA_LINUX_REPO)/overlay"`. Buildroot expands this from the environment, and `build.sh` exports it. Keep using this form, not absolute paths.
 - The 2024.02 configs reference `buildroot_2024.02/amiga_users_table.txt`, which is not in the repo yet.
 - `buildroot_2024.05/package/x11vnc/0003-Fix-mutex-declarations.patch` goes into Buildroot's `package/x11vnc/` (next to its existing patches). It turns mutex definitions in a header into `static` ones, which avoids multiple-definition link errors with modern GCC.
+- `buildroot_2024.05/package/lbreakout2/0001-client-local-games-without-network-support.patch`: lbreakout2 2.6.5 built with `--disable-network` (our config) compiles out the client's copy of the local game state, so a fired ball stays drawn on the paddle. The patch takes the local path out of the `NETWORK_ENABLED` guards. Buildroot applies package patches only on extraction: after changing one, delete `/work/br-<config>/build/<pkg>-<ver>` so the next rootfs build re-patches it.
 
 ### Rootfs overlay (`overlay/`)
 Copied over the target rootfs by Buildroot. It contains `etc/X11/xorg.conf` (the `warp` driver, `Driver "fbdev"` as the fallback; input autodetection off), shell `.profile`s for `root` and user `andy`, and a demo web page in `var/www/`.
