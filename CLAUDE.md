@@ -61,6 +61,7 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
   - FreeWay Triton (Zorro III USB 2.0 card) support in `drivers/usb/isp1760/`: a big-endian 32-bit bus mode for the ISP1760, and a Zorro probe in `isp1760-if.c` (chip 1 MB into the board, reset and interrupt enable through the board registers at +0xC0000/+0xE0000, INT6 by default, `isp1760.zorro_int=2` for INT2). The kernel config enables USB host, mass storage, HID and the common USB ethernet drivers for it.
   - Unrelated fixes: inverted button polarity in `amimouse.c`, and a `depth:` option plus debug printks in `amifb.c`.
 - `kernel_6.9_m68k_amiga_cfg` is the `.config` to use (`ARCH=m68k`, `CONFIG_LOCALVERSION="-amiga"`). It enables `MFD_CSWARP` and the Warp drivers built-in and disables the stock `FB_AMIGA`. Because `olddefconfig` silently turns a new, unset Kconfig symbol off, add any new symbol to this file explicitly.
+- `CONFIG_COMPACTION` is off on purpose. The Warp's RAM comes in blocks with a large hole between them (on the A3000/7060: 0x08000000–0x0fffffff and the DDR3 Zorro board at 0x40000000), and with `FLATMEM` the compaction scanner walks into the hole's fake struct pages and oopses (`get_pfnblock_flags_mask` from `kcompactd`/`compact_memory`). Don't re-enable it without a memory model that knows about the hole.
 - If you add or rename a driver, update both the source file here and the Kconfig/Makefile hunks in the patch.
 
 ### Warp driver architecture
