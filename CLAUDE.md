@@ -119,4 +119,6 @@ Copied over the target rootfs by Buildroot. It contains `etc/system.jwmrc` (the 
 
 ## Notes
 - This is a cross-compile target (m68k). Nothing can be run on the dev machine. Verify driver changes with `./build.sh kernel`.
+- The rootfs uses merged `/usr`: `/lib`, `/bin`, `/sbin` (and `/lib32`) are symlinks into `/usr`. Never extract a tarball that holds `lib/...` (like `modules-<rel>.tar.gz`) onto `/` of a running system: GNU tar replaces the `/lib` symlink with a real directory, `/lib/ld.so.1` disappears and no program starts any more, not even after a reboot. Extract it with `-C /usr` instead. Recovery: boot a static-busybox initramfs with `amiboot -r` (the normal kernel has `BLK_DEV_INITRD`), mount the root partition and put the symlink back.
+- Install the kernel's modules together with `vmlinux`: a config change can drop exported symbols (turning off `COMPACTION` removed `buffer_migrate_folio`), and modules from an older build then fail with "Unknown symbol".
 - `.DS_Store` files are macOS noise and shouldn't be committed.
