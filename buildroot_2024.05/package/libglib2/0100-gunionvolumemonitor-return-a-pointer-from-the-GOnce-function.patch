@@ -1,0 +1,47 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] gunionvolumemonitor: return a pointer from the GOnce function
+
+get_default_native_class() returns a GType but is called by g_once()
+through a GThreadFunc cast, which returns a pointer.  On m68k integers
+come back in %d0 and pointers in %a0, so g_once() stored whatever was
+in %a0 as the native volume monitor's type, and the next
+g_type_class_ref() on it crashed: every g_volume_monitor_get() caller
+(PCManFM, any GTK file chooser) segfaulted.
+
+Return the type as a pointer, so the function matches GThreadFunc.
+
+Upstream-Status: Pending
+Signed-off-by: Andrzej Rogozynski <sellen@cs-lab.eu>
+---
+--- a/gio/gunionvolumemonitor.c
++++ b/gio/gunionvolumemonitor.c
+@@ -422,12 +422,12 @@
+   g_signal_handlers_disconnect_by_func (child_monitor, child_drive_stop_button, union_monitor);
+ }
+ 
+-static GType
++static gpointer
+ get_default_native_class (gpointer data)
+ {
+-  return _g_io_module_get_default_type (G_NATIVE_VOLUME_MONITOR_EXTENSION_POINT_NAME,
+-                                        "GIO_USE_VOLUME_MONITOR",
+-                                        G_STRUCT_OFFSET (GVolumeMonitorClass, is_supported));
++  return GSIZE_TO_POINTER (_g_io_module_get_default_type (G_NATIVE_VOLUME_MONITOR_EXTENSION_POINT_NAME,
++                                                          "GIO_USE_VOLUME_MONITOR",
++                                                          G_STRUCT_OFFSET (GVolumeMonitorClass, is_supported)));
+ }
+ 
+ /* We return the class, with a ref taken.
+@@ -442,10 +442,10 @@
+   GTypeClass *type_class;
+ 
+   type_class = NULL;
+-  g_once (&once_init, (GThreadFunc)get_default_native_class, &type_class);
++  g_once (&once_init, get_default_native_class, &type_class);
+ 
+   if (type_class == NULL && once_init.retval != GUINT_TO_POINTER(G_TYPE_INVALID))
+-    type_class = g_type_class_ref ((GType)once_init.retval);
++    type_class = g_type_class_ref ((GType) GPOINTER_TO_SIZE (once_init.retval));
+   
+   return (GNativeVolumeMonitorClass *)type_class;
+ }
