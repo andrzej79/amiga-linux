@@ -151,10 +151,13 @@ build_rootfs() {
     br_prepare
     log "Building rootfs"
     # local-source packages are rsynced once per output tree: re-sync and
-    # rebuild the X driver so the image always has the current xdriver/
-    if ls -d "$BR_OUT"/build/xdriver_xf86-video-warp-* >/dev/null 2>&1; then
-        br_make xdriver_xf86-video-warp-rebuild
-    fi
+    # rebuild them so the image always has the current xdriver/ and warptool/
+    local pkg
+    for pkg in xdriver_xf86-video-warp warptool; do
+        if ls -d "$BR_OUT"/build/"$pkg"-* >/dev/null 2>&1; then
+            br_make "$pkg"-rebuild
+        fi
+    done
     br_make
     local dest=$OUT/$(basename "$BR_CONFIG")
     mkdir -p "$dest"

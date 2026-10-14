@@ -1,0 +1,8 @@
+config BR2_PACKAGE_WARPTOOL
+	bool "warptool"
+	depends on BR2_m68k
+	help
+	  CS-Lab Warp board status and settings: diagnostic data, 68k
+	  clock, L2 cache and audio mixer.  The Linux counterpart of
+	  AmigaOS WarpTool, with the same keywords; it works through
+	  the kernel's cswarp-ctl sysfs files.

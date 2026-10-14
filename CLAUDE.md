@@ -38,6 +38,9 @@ BR_CONFIG=buildroot_2024.05/buildroot_cfg_202405_pre_xorg ./build.sh rootfs
 - The kernel exposes only the first 4 KB of the CTRL board to user space (`fix.mmio_len`), which holds the blitter, display, CLUT and sprite registers. That page is what `fbdevHWMapMMIO` maps.
 - The exit log line `WARP(0): stats:` counts accelerated copies, fills and text, shadow pushes and refreshes. `Option "Debug"` also logs GC ops-table state and adds timings to it (a syscall per reading on m68k, so only then).
 
+### warptool (`warptool/`)
+- `warptool/warptool.c` is the Linux counterpart of AmigaOS WarpTool (`csWarpAmigaSoftware/WarpTool`): the same case-insensitive keywords (`Diag`, `CPUFreqHz=`, `L2Info`, `L2Policy=`, `L2EarlyAck=`, `L2Stats`, `Audio`, `volMaster=` and the other `vol*`), the same run order (setters before views) and output layout. It only reads and writes the `cswarp-ctl` sysfs files, never the hardware. It is the local-source Buildroot package `warptool` in `br2-external/`; like the X driver, `build_rootfs` rebuilds it every time.
+
 ### CF card (`cfcard/`)
 - `cfcard/make-cf.sh [--image-only] [--verify] diskN` runs on the macOS host:
   - Its safety checks refuse internal, non-whole, non-removable, boot, APFS-store and >256 GB disks.
