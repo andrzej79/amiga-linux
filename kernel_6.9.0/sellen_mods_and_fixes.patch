@@ -147,6 +147,220 @@ index 0d872d4..e7492d4 100644
  obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
  obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
 +obj-$(CONFIG_AMIWARPNET) += amiwarpnet.o
+diff --git a/drivers/scsi/a3000.c b/drivers/scsi/a3000.c
+index 378906f..1117cda 100644
+--- a/drivers/scsi/a3000.c
++++ b/drivers/scsi/a3000.c
+@@ -27,8 +27,26 @@ struct a3000_hostdata {
+ 	struct WD33C93_hostdata wh;
+ 	struct a3000_scsiregs *regs;
+ 	struct device *dev;
++	void *bounce;			/* A3000_BOUNCE_LEN, reachable by the SDMAC */
++	bool bounced;			/* the transfer in flight uses it */
+ };
+ 
++/*
++ * The SDMAC reaches chip RAM and the A3000's 32-bit RAM space up to the end
++ * of the CPU slot area (0x08000000-0x0fffffff, where an accelerator's RAM
++ * sits), but not Zorro III memory - which Linux may also use, e.g. a Warp's
++ * DDR3 board at 0x40000000.  Transfers elsewhere go through a bounce buffer
++ * in reach; one segment is at most BLK_MAX_SEGMENT_SIZE.
++ */
++#define A3000_DMA_LIMIT		0x10000000UL
++#define A3000_BOUNCE_LEN	BLK_MAX_SEGMENT_SIZE
++
++static bool a3000_dma_ok(unsigned long addr, unsigned long len)
++{
++	return !(addr & A3000_XFER_MASK) && addr < A3000_DMA_LIMIT &&
++	       len <= A3000_DMA_LIMIT - addr;
++}
++
+ #define DMA_DIR(d)   ((d == DATA_OUT_DIR) ? DMA_TO_DEVICE : DMA_FROM_DEVICE)
+ 
+ static irqreturn_t a3000_intr(int irq, void *data)
+@@ -59,59 +77,38 @@ static int dma_setup(struct scsi_cmnd *cmd, int dir_in)
+ 	struct WD33C93_hostdata *wh = &hdata->wh;
+ 	struct a3000_scsiregs *regs = hdata->regs;
+ 	unsigned short cntr = CNTR_PDMD | CNTR_INTEN;
++	void *buf = scsi_pointer->ptr;
+ 	dma_addr_t addr;
+ 
+-	addr = dma_map_single(hdata->dev, scsi_pointer->ptr,
+-			      len, DMA_DIR(dir_in));
+-	if (dma_mapping_error(hdata->dev, addr)) {
+-		dev_warn(hdata->dev, "cannot map SCSI data block %p\n",
+-			 scsi_pointer->ptr);
+-		return 1;
+-	}
+-	scsi_pointer->dma_handle = addr;
+-
+ 	/*
+-	 * if the physical address has the wrong alignment, or if
+-	 * physical address is bad, or if it is a write and at the
+-	 * end of a physical memory chunk, then allocate a bounce
+-	 * buffer
+-	 * MSch 20220629 - only wrong alignment tested - bounce
+-	 * buffer returned by kmalloc is guaranteed to be aligned
++	 * Out of the SDMAC's reach or misaligned: through the bounce buffer,
++	 * or by PIO (return 1) when there is none or it is too small.
+ 	 */
+-	if (addr & A3000_XFER_MASK) {
+-		WARN_ONCE(1, "Invalid alignment for DMA!");
+-		/* drop useless mapping */
+-		dma_unmap_single(hdata->dev, scsi_pointer->dma_handle,
+-				 scsi_pointer->this_residual,
+-				 DMA_DIR(dir_in));
+-
+-		wh->dma_bounce_len = (scsi_pointer->this_residual + 511) & ~0x1ff;
+-		wh->dma_bounce_buffer = kmalloc(wh->dma_bounce_len,
+-						GFP_KERNEL);
+-
+-		/* can't allocate memory; use PIO */
+-		if (!wh->dma_bounce_buffer) {
+-			wh->dma_bounce_len = 0;
++	hdata->bounced = false;
++	/* nothing to move (TEST UNIT READY and the like): no mapping either */
++	if (!len) {
++		scsi_pointer->dma_handle = (dma_addr_t) NULL;
++		return 1;
++	}
++	if (!a3000_dma_ok(virt_to_phys(buf), len)) {
++		if (!hdata->bounce || len > A3000_BOUNCE_LEN) {
+ 			scsi_pointer->dma_handle = (dma_addr_t) NULL;
+ 			return 1;
+ 		}
++		if (!dir_in)
++			memcpy(hdata->bounce, buf, len);
++		buf = hdata->bounce;
++		hdata->bounced = true;
++	}
+ 
+-		if (!dir_in) {
+-			/* copy to bounce buffer for a write */
+-			memcpy(wh->dma_bounce_buffer, scsi_pointer->ptr,
+-			       scsi_pointer->this_residual);
+-		}
+-
+-		addr = dma_map_single(hdata->dev, scsi_pointer->ptr,
+-				      len, DMA_DIR(dir_in));
+-		if (dma_mapping_error(hdata->dev, addr)) {
+-			dev_warn(hdata->dev,
+-				 "cannot map SCSI data block %p\n",
+-				 scsi_pointer->ptr);
+-			return 1;
+-		}
+-		scsi_pointer->dma_handle = addr;
++	addr = dma_map_single(hdata->dev, buf, len, DMA_DIR(dir_in));
++	if (dma_mapping_error(hdata->dev, addr)) {
++		dev_warn(hdata->dev, "cannot map SCSI data block %p\n", buf);
++		hdata->bounced = false;
++		scsi_pointer->dma_handle = (dma_addr_t) NULL;
++		return 1;
+ 	}
++	scsi_pointer->dma_handle = addr;
+ 
+ 	/* setup dma direction */
+ 	if (!dir_in)
+@@ -180,21 +177,49 @@ static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
+ 			 scsi_pointer->this_residual,
+ 			 DMA_DIR(wh->dma_dir));
+ 
+-	/* copy from a bounce buffer, if necessary */
+-	if (status && wh->dma_bounce_buffer) {
+-		if (SCpnt) {
+-			if (wh->dma_dir && SCpnt)
+-				memcpy(scsi_pointer->ptr, wh->dma_bounce_buffer,
+-				       scsi_pointer->this_residual);
+-			kfree(wh->dma_bounce_buffer);
+-			wh->dma_bounce_buffer = NULL;
+-			wh->dma_bounce_len = 0;
+-		} else {
+-			kfree(wh->dma_bounce_buffer);
+-			wh->dma_bounce_buffer = NULL;
+-			wh->dma_bounce_len = 0;
++	/* copy from the bounce buffer: this_residual still holds the length */
++	if (hdata->bounced) {
++		if (status && wh->dma_dir)
++			memcpy(scsi_pointer->ptr, hdata->bounce,
++			       scsi_pointer->this_residual);
++		hdata->bounced = false;
++	}
++}
++
++/*
++ * A bounce buffer the SDMAC can reach.  Kernel memory may lie on both sides
++ * of A3000_DMA_LIMIT, so allocate until a block below it turns up, keeping
++ * the misses on a list (in their first bytes) until then.
++ */
++static void *a3000_alloc_bounce(struct device *dev)
++{
++	void *miss = NULL, *buf = NULL;
++	int i;
++
++	for (i = 0; i < 64; i++) {
++		void *b = kmalloc(A3000_BOUNCE_LEN, GFP_KERNEL | __GFP_NOWARN);
++
++		if (!b)
++			break;
++		if (a3000_dma_ok(virt_to_phys(b), A3000_BOUNCE_LEN)) {
++			buf = b;
++			break;
+ 		}
++		*(void **)b = miss;
++		miss = b;
++	}
++	while (miss) {
++		void *next = *(void **)miss;
++
++		kfree(miss);
++		miss = next;
+ 	}
++	if (buf)
++		dev_info(dev, "DMA bounce buffer at %pa\n", &(phys_addr_t){ virt_to_phys(buf) });
++	else
++		dev_warn(dev, "no DMA bounce buffer below 0x%lx, transfers out of reach use PIO\n",
++			 A3000_DMA_LIMIT);
++	return buf;
+ }
+ 
+ static const struct scsi_host_template amiga_a3000_scsi_template = {
+@@ -254,6 +279,7 @@ static int __init amiga_a3000_scsi_probe(struct platform_device *pdev)
+ 	hdata->wh.no_sync = 0xff;
+ 	hdata->wh.fast = 0;
+ 	hdata->wh.dma_mode = CTRL_DMA;
++	hdata->bounce = a3000_alloc_bounce(&pdev->dev);
+ 	hdata->regs = regs;
+ 
+ 	wd33c93_init(instance, wdregs, dma_setup, dma_stop, WD33C93_FS_12_15);
+@@ -276,6 +302,7 @@ static int __init amiga_a3000_scsi_probe(struct platform_device *pdev)
+ fail_host:
+ 	free_irq(IRQ_AMIGA_PORTS, instance);
+ fail_irq:
++	kfree(hdata->bounce);
+ 	scsi_host_put(instance);
+ fail_alloc:
+ 	release_mem_region(res->start, resource_size(res));
+@@ -291,6 +318,7 @@ static void __exit amiga_a3000_scsi_remove(struct platform_device *pdev)
+ 	hdata->regs->CNTR = 0;
+ 	scsi_remove_host(instance);
+ 	free_irq(IRQ_AMIGA_PORTS, instance);
++	kfree(hdata->bounce);
+ 	scsi_host_put(instance);
+ 	release_mem_region(res->start, resource_size(res));
+ }
+diff --git a/drivers/scsi/wd33c93.c b/drivers/scsi/wd33c93.c
+index e4fafc7..7961e25 100644
+--- a/drivers/scsi/wd33c93.c
++++ b/drivers/scsi/wd33c93.c
+@@ -826,6 +826,8 @@ wd33c93_intr(struct Scsi_Host *instance)
+ 		DB(DB_INTR, printk("SELECT"))
+ 		    hostdata->connected = cmd =
+ 		    (struct scsi_cmnd *) hostdata->selecting;
++		/* scsi_pointer was taken from connected, NULL until now */
++		scsi_pointer = WD33C93_scsi_pointer(cmd);
+ 		hostdata->selecting = NULL;
+ 
+ 		/* construct an IDENTIFY message with correct disconnect bit */
 diff --git a/drivers/usb/isp1760/isp1760-core.c b/drivers/usb/isp1760/isp1760-core.c
 index af88f4f..a1f5b35 100644
 --- a/drivers/usb/isp1760/isp1760-core.c
