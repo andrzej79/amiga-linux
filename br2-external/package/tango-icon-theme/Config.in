@@ -1,0 +1,9 @@
+config BR2_PACKAGE_TANGO_ICON_THEME
+	bool "tango-icon-theme"
+	select BR2_PACKAGE_HICOLOR_ICON_THEME
+	help
+	  The Tango icon theme, its 16, 22 and 32 pixel PNGs only (no
+	  SVGs, so no librsvg is needed): about 3 MB, enough for GTK
+	  menus, panels and 32 px desktop icons.
+
+	  http://tango.freedesktop.org/

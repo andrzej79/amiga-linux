@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Warp desktop root menu.  Per-user copy: ~/.config/openbox/menu.xml -->
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+
+<menu id="apps-menu" label="Applications">
+  <item label="Text editor (Leafpad)"><action name="Execute"><command>leafpad</command></action></item>
+  <item label="Text editor (xedit)"><action name="Execute"><command>xedit</command></action></item>
+  <item label="Calculator"><action name="Execute"><command>xcalc</command></action></item>
+  <item label="Clock"><action name="Execute"><command>xclock</command></action></item>
+</menu>
+
+<menu id="system-menu" label="System">
+  <item label="Process viewer (htop)"><action name="Execute"><command>xterm -T htop -e htop</command></action></item>
+  <item label="Load meter"><action name="Execute"><command>xload</command></action></item>
+  <item label="Kill a window"><action name="Execute"><command>xkill</command></action></item>
+</menu>
+
+<menu id="toys-menu" label="Toys">
+  <item label="Eyes"><action name="Execute"><command>xeyes</command></action></item>
+  <item label="X logo"><action name="Execute"><command>xlogo</command></action></item>
+</menu>
+
+<menu id="root-menu" label="Warp">
+  <separator label="Warp Linux"/>
+  <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
+  <item label="File manager"><action name="Execute"><command>pcmanfm</command></action></item>
+  <item label="Midnight Commander"><action name="Execute"><command>xterm -T mc -e mc</command></action></item>
+  <separator/>
+  <menu id="apps-menu"/>
+  <menu id="system-menu"/>
+  <menu id="toys-menu"/>
+  <menu id="client-list-combined-menu"/>
+  <separator/>
+  <item label="Reconfigure Openbox"><action name="Reconfigure"/></item>
+  <item label="Log out"><action name="Exit"><prompt>yes</prompt></action></item>
+</menu>
+
+</openbox_menu>

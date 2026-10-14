@@ -1,0 +1,4 @@
+# Warp desktop (Openbox session): panel and desktop.  Per-user copy:
+# ~/.config/openbox/autostart
+tint2 &
+pcmanfm --desktop &

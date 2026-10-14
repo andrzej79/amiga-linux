@@ -769,7 +769,7 @@ BR2_PACKAGE_LIBERATION_SERIF=y
 #
 # Icons
 #
-# BR2_PACKAGE_HICOLOR_ICON_THEME is not set
+BR2_PACKAGE_HICOLOR_ICON_THEME=y
 
 #
 # Sounds
@@ -1258,7 +1258,6 @@ BR2_PACKAGE_XDATA_XBITMAPS=y
 # BR2_PACKAGE_FEH is not set
 # BR2_PACKAGE_MUPDF is not set
 # BR2_PACKAGE_NODM is not set
-# BR2_PACKAGE_PCMANFM is not set
 # BR2_PACKAGE_RDESKTOP is not set
 # BR2_PACKAGE_SYNERGY is not set
 
@@ -1267,7 +1266,7 @@ BR2_PACKAGE_XDATA_XBITMAPS=y
 #
 # BR2_PACKAGE_WMCTRL is not set
 BR2_PACKAGE_X11VNC=y
-# BR2_PACKAGE_XDOTOOL is not set
+BR2_PACKAGE_XDOTOOL=y
 
 #
 # xscreensaver needs a toolchain w/ wchar, C++, threads, gcc >= 4.9, OpenGL backend
@@ -2361,7 +2360,7 @@ BR2_PACKAGE_LIBDRM_HAS_ATOMIC=y
 # libglu needs an OpenGL backend
 #
 # BR2_PACKAGE_LIBGTA is not set
-# BR2_PACKAGE_LIBGTK2 is not set
+BR2_PACKAGE_LIBGTK2=y
 
 #
 # libgtk3 needs an OpenGL or an OpenGL-EGL/wayland backend
@@ -4635,3 +4634,7 @@ BR2_TARGET_UBOOT_CUSTOM_PATCH_DIR=""
 # Warp X driver (br2-external, see build.sh)
 BR2_PACKAGE_XDRIVER_XF86_VIDEO_WARP=y
 BR2_PACKAGE_JWM=y
+BR2_PACKAGE_TINT2=y
+BR2_PACKAGE_TANGO_ICON_THEME=y
+BR2_PACKAGE_PCMANFM=y
+BR2_PACKAGE_LEAFPAD=y

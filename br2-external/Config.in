@@ -1,2 +1,4 @@
 source "$BR2_EXTERNAL_WARP_PATH/package/xdriver_xf86-video-warp/Config.in"
 source "$BR2_EXTERNAL_WARP_PATH/package/jwm/Config.in"
+source "$BR2_EXTERNAL_WARP_PATH/package/tint2/Config.in"
+source "$BR2_EXTERNAL_WARP_PATH/package/tango-icon-theme/Config.in"
