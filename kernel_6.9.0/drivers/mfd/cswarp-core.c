@@ -476,7 +476,7 @@ EXPORT_SYMBOL_GPL(cswarp_unit_unregister);
 /* Identity                                                                 */
 /* ------------------------------------------------------------------------ */
 
-static void cswarp_fw_ver_str(u32 ver, char *buf, size_t len)
+void cswarp_fw_ver_str(u32 ver, char *buf, size_t len)
 {
 	if (ver == WARP_FMW_VER_DEVBUILD)
 		snprintf(buf, len, "dev build");
@@ -484,6 +484,7 @@ static void cswarp_fw_ver_str(u32 ver, char *buf, size_t len)
 		/* release 30.54 is reported as 0x3054 */
 		snprintf(buf, len, "%x%x.%02x", (ver >> 12) & 0xf, (ver >> 8) & 0xf, ver & 0xff);
 }
+EXPORT_SYMBOL_GPL(cswarp_fw_ver_str);
 
 /* Silence every source that can hold INT2 asserted before the handler is up */
 static void cswarp_quiesce(struct cswarp_core *wc)
@@ -683,6 +684,7 @@ static const struct mfd_cell cswarp_cells[] = {
 	{ .name = "cswarp-ata" },
 	{ .name = "cswarp-fb" },
 	{ .name = "cswarp-disk" },
+	{ .name = "cswarp-ctl" },
 };
 
 static int cswarp_probe(struct zorro_dev *z, const struct zorro_device_id *ent)
@@ -777,7 +779,7 @@ static int cswarp_probe(struct zorro_dev *z, const struct zorro_device_id *ent)
 		dev_err(wc->dev, "cannot add function devices (%d)\n", err);
 		goto err_irq;
 	}
-	cswarp_dbg(CSWARP_DBG_CORE, wc->dev, "function devices added: net, ata, fb, disk\n");
+	cswarp_dbg(CSWARP_DBG_CORE, wc->dev, "function devices added: net, ata, fb, disk, ctl\n");
 	return 0;
 
 err_irq:

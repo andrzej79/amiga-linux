@@ -7,6 +7,7 @@
 | IDE | `drivers/ata/pata_cswarp.c` | MFD child `cswarp-ata` | `PATA_CSWARP` |
 | RTG framebuffer | `drivers/video/fbdev/amiwarpfb.c` + `amiwarp_vidclk.c` | MFD child `cswarp-fb` (+ Zorro VRAM board) | `FB_AMIGA_WARP` |
 | SD card / USB disks | `drivers/block/cswarp_disk.c` | MFD child `cswarp-disk` | `BLK_DEV_CSWARP` |
+| board control | `drivers/mfd/cswarp-ctl.c` | MFD child `cswarp-ctl` | `MFD_CSWARP` |
 
 The core refuses to bind, and none of the others load, when either of these is true:
 - The FPGA has no DPREG register file: the ID at CTRL+0x1004 is not `0x80570001`.
@@ -60,6 +61,26 @@ The mask can be changed at runtime: `echo 0x1ff > /sys/module/cswarp_core/parame
 The disk driver adds `disk_stats` (per unit: reads, writes, bytes, errors, timeouts, cancels, busy retries, media changes, DMA state and chunk counts, zero-copy chunks/runs and why chunks were bounced, and where request time went in us: `total`, `submit`, `wait` for the board, `xfer` fetch exchanges, `tc`, `cache` maintenance, `copy` bounce copies) on the `cswarp-disk` platform device. Writing anything to it zeroes the counters.
 
 The framebuffer adds `accel_stats` (fill, copy and pan counts, blitter wait timeouts, current pixel clock) on the `cswarp-fb` platform device.
+
+## Board control (`cswarp-ctl`, used by `warptool`)
+
+The Linux side of AmigaOS WarpTool, on the platform device `/sys/bus/platform/devices/cswarp-ctl/`:
+
+| File | Meaning |
+|---|---|
+| `board/diag` | everything `dpcmdGetDiag` reports, one `key value` per line: board, type, versions, Kickstart slot, 68k clock and phase, temperatures (m°C), 5 V and battery (mV), USB host status, IDE mode and timings, fan settings and output, WiFi SSID/state/RSSI/channel, video output, L2 geometry, L2 early read ack. The WiFi password is not in it. |
+| `board/wifi_password` | the stored WiFi password (root only) |
+| `board/cpu_clock_hz` | the 68k clock; writing Hz (25-60 MHz on 68040 boards, 33-120 MHz on 68060 boards) reprograms the board's PLL at once. The board keeps the setting. `loops_per_jiffy` is rescaled, so `udelay()` and `/proc/cpuinfo` follow. |
+| `l2/size_kb`, `l2/ways`, `l2/line_bytes` | L2 geometry |
+| `l2/policy` | `lru` or `legacy`; writing also flushes the L2 and zeroes the counters. Hidden on FPGA images without the register (SysCfg id < `0x01234568`). |
+| `l2/early_ack` | `on`/`off` plus `default`/`user`; write `on`, `off` or `default` (fw 30.22+; `EOPNOTSUPP` on an FPGA core without the switch) |
+| `l2/stats` | `accesses`, `hits`, `misses`, `writebacks`; any write zeroes them (SysCfg id >= `0x01234569`) |
+| `audio/master`, `paula`, `ahi`, `mhi`, `line_out`, `speaker` | `<dB>` or `<dB> mute`; write a dB value (sets and unmutes), `mute` (keeps the level) or `unmute`. The board refuses levels outside the channel's range (`ERANGE`). fw 30.54+. |
+| `audio/state` | codec state and counters, and `channel <name> <dB> <min> <max> <muted>` lines |
+
+The diag reply is cached for 0.5 s. A hwmon device `warp` (`/sys/class/hwmon/hwmonN`; `sensors` from lm-sensors, which is in the image, shows it as `warp-isa-0000`) has `temp1`-`temp4` (68k internal, 68k NTC, ARM, FPGA), `in0`/`in1` (+5V, Vbatt) and `pwm1` (fan output, 0-255, read-only).
+
+`warptool` (userspace, `warptool/` in the repo) takes WarpTool's keywords: `Diag` (default), `WiFiShowPass`, `CPUFreqHz=105.5M`, `L2Info`, `L2Policy=lru|legacy`, `L2EarlyAck=on|off|default`, `L2Stats`, `L2StatsReset`, `Audio`, `volMaster=`/`volAmiga=`/`volAhi=`/`volMhi=`/`volLineOut=`/`volSpeaker=` (dB or `mute`).
 
 ## SD card and USB disks (`cswarp-disk`)
 

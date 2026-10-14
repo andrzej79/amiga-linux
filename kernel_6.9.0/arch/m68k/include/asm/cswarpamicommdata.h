@@ -151,12 +151,15 @@
 #define NETTLM_FLAG_RESET		BIT(0)
 #define NETTLM_WORDS			103
 #define WARP_FMW_VER_MIN_LINUX		WARP_FMW_VER(3, 0, 0x00)	/* release 3.000 */
+#define WARP_FMW_VER_MIN_L2EARLYACK	WARP_FMW_VER(3, 0, 0x22)	/* dpcmdSetL2EarlyAck, diag l2EarlyAck* */
+#define WARP_FMW_VER_MIN_AUDIOMIX	WARP_FMW_VER(3, 0, 0x54)	/* dpcmdAudioGetState/SetChannel */
 
 /* Commands (68k -> ARM), DprCmd */
 enum {
 	dpcmdGetDiag			= 6,
 	dpcmdSetIdeMode			= 7,
 	dpcmdSDGetInfo			= 17,	/* reply dprplSDGetInfo */
+	dpcmdSetCPUClkConfig		= 36,	/* no reply; the PLL changes at once */
 	dpcmdUSBDiskGetUnits		= 40,	/* reply dprplUSBDiskUnits */
 	dpcmdEthTransmit		= 23,	/* legacy, interface 0 only */
 	dpcmdEthReceive			= 24,	/* legacy */
@@ -169,6 +172,9 @@ enum {
 	dpcmdUnitFetch			= 62,	/* reply dprplUnitData */
 	dpcmdUnitCancel			= 63,	/* reply dprplUnitAck */
 	dpcmdUnitCaps			= 64,	/* reply dprplUnitCaps */
+	dpcmdSetL2EarlyAck		= 71,	/* no reply, fw >= 30.22 */
+	dpcmdAudioGetState		= 82,	/* reply dprplAudioState, fw >= 30.54 */
+	dpcmdAudioSetChannel		= 83,	/* reply dprplAudioState, fw >= 30.54 */
 };
 
 /* Replies (ARM -> 68k), DprRpl */
@@ -185,7 +191,52 @@ enum {
 	dprplUnitAck			= 31,
 	dprplUnitData			= 32,
 	dprplUnitCaps			= 33,
+	dprplAudioState			= 39,
 };
+
+/* dpcmdGetDiag: usbDevStatus[] */
+enum {
+	USBDevNone			= 0,
+	USBDevHID			= 1,
+	USBDevMassStorage		= 2,
+	USBDevOther			= 3,
+	USBDevHub			= 4,
+};
+
+/* dpcmdGetDiag: wifiState */
+enum {
+	wifiUnknown			= 0,
+	wifiStarted			= 1,
+	wifiStopped			= 2,
+	wifiConnected			= 3,
+	wifiDisconnected		= 4,
+};
+
+/* dpcmdSetL2EarlyAck mode, and the stored diag l2EarlyAckMode */
+#define L2EA_MODE_DEFAULT		0
+#define L2EA_MODE_OFF			1
+#define L2EA_MODE_ON			2
+/* diag l2EarlyAckReg: live FPGA readback; capability id 0 = no such switch */
+#define L2EA_REG_ENABLE			0x00000001u
+#define L2EA_REG_CAPID(r)		((u32)(r) >> 24)
+
+/* The audio mixer (fw >= 30.54): every level a gain in whole dB */
+#define AUDCH_PAULA			0	/* the Amiga's own audio, through the codec ADC */
+#define AUDCH_AHI			1
+#define AUDCH_MHI			2
+#define AUDCH_MASTER			3
+#define AUDCH_LINEOUT			4	/* codec headphone/line driver */
+#define AUDCH_SPEAKER			5	/* codec speaker driver */
+#define AUDCH_COUNT			6
+#define AUDCH_MAX			8	/* slots in DprAudioState.ch[] */
+#define AUDF_MUTE			0x01u
+#define AUDGS_METERS			0x01u
+#define AUDRES_OK			0
+#define AUDRES_BADCHANNEL		1
+#define AUDRES_RANGE			2	/* gain outside [minDb, maxDb]: refused */
+#define AUDRES_CODEC			3	/* stored, but the codec did not take it */
+#define AUDCODEC_F_INIT_OK		0x01u
+#define AUDIOSTATE_VERSION		1
 
 #pragma pack(push, 2)
 
@@ -376,6 +427,58 @@ typedef struct {
 	u32 unitCount;
 	DprUSBDiskUnit units[WARP_USB_DISK_MAX_UNITS];
 } DprRplUSBDiskUnits;
+
+/* dpcmdSetCPUClkConfig: the floats are raw IEEE-754 words */
+typedef struct {
+	DprCmdHeader header;
+	u32 cpuClockMHz;		/* float */
+	u32 cpuClkPhaseShiftDeg;	/* float, ignored when cpuClockPhaseShiftAuto */
+	u8  cpuClockPhaseShiftAuto;
+} DprCmdSetCPUClkConfig;
+
+typedef struct {
+	DprCmdHeader header;
+	u8  mode;			/* L2EA_MODE_* */
+} DprCmdL2EarlyAck;
+
+typedef struct {
+	DprCmdHeader header;
+	u32 flags;			/* AUDGS_* */
+} DprCmdAudioGetState;
+
+/* out-of-range gains are refused, not clamped */
+typedef struct {
+	DprCmdHeader header;
+	u8  channel;			/* AUDCH_* */
+	s8  gainDb;
+	u8  flags;			/* AUDF_* */
+	u8  pad;
+} DprCmdAudioSetChannel;
+
+typedef struct {
+	s8  gainDb;
+	s8  minDb;			/* the lowest audible step; below it only mute */
+	s8  maxDb;
+	u8  flags;			/* AUDF_* */
+} DprAudioChannel;
+
+typedef struct {
+	u32 version;			/* AUDIOSTATE_VERSION */
+	u32 result;			/* AUDRES_* of the command this replies to */
+	u32 channelCount;
+	u32 sampleRate;			/* Hz */
+	u32 codecFlags;			/* AUDCODEC_F_* */
+	u32 codecI2cErrors;
+	u32 clipCount;			/* output samples saturated since boot */
+	u32 saiErrors;
+	u32 reserved[4];
+	DprAudioChannel ch[AUDCH_MAX];
+} DprAudioState;
+
+typedef struct {
+	DprRplHeader header;
+	DprAudioState st;
+} DprRplAudioState;
 
 #pragma pack(pop)
 

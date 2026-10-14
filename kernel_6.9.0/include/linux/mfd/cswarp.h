@@ -214,5 +214,7 @@ int cswarp_unit_register(struct cswarp_core *wc, unsigned int unit,
 void cswarp_unit_unregister(struct cswarp_core *wc, unsigned int unit);
 
 const char *cswarp_board_type_name(u8 type);
+/* "30.54" for 0x3054, "dev build" for WARP_FMW_VER_DEVBUILD */
+void cswarp_fw_ver_str(u32 ver, char *buf, size_t len);
 
 #endif /* _LINUX_MFD_CSWARP_H */

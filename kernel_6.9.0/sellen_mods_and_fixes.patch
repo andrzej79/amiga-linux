@@ -83,10 +83,10 @@ index 2fbbaeb..97488ba 100644
  	input_sync(dev);
  
 diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
-index 4b023ee..4533237 100644
+index 4b023ee..f1313ff 100644
 --- a/drivers/mfd/Kconfig
 +++ b/drivers/mfd/Kconfig
-@@ -11,6 +11,21 @@ config MFD_CORE
+@@ -11,6 +11,23 @@ config MFD_CORE
  	select IRQ_DOMAIN
  	default n
  
@@ -98,8 +98,10 @@ index 4b023ee..4533237 100644
 +	  Core driver for the CS-Lab Warp Amiga turbo boards (Warp560,
 +	  Warp1240/1260/1260X, Warp7060, ...).  It owns the board's control
 +	  registers, the dual-port RAM command channel to the board's ARM
-+	  and its INT2 interrupt, and creates the network, IDE and RTG
-+	  framebuffer function devices.
++	  and its INT2 interrupt, and creates the network, IDE, RTG
++	  framebuffer and disk function devices, plus cswarp-ctl: board
++	  status and settings in sysfs (CPU clock, L2 cache, audio mixer)
++	  and hwmon (temperatures, voltages, fan), as used by warptool.
 +
 +	  Requires Warp firmware package 3.000 or later.
 +
@@ -109,14 +111,15 @@ index 4b023ee..4533237 100644
  	tristate "AMD CS5535 and CS5536 southbridge core functions"
  	select MFD_CORE
 diff --git a/drivers/mfd/Makefile b/drivers/mfd/Makefile
-index c66f07e..9ffd79a 100644
+index c66f07e..d31c1b3 100644
 --- a/drivers/mfd/Makefile
 +++ b/drivers/mfd/Makefile
-@@ -116,6 +116,7 @@ obj-$(CONFIG_MFD_MC13XXX_SPI)	+= mc13xxx-spi.o
+@@ -116,6 +116,8 @@ obj-$(CONFIG_MFD_MC13XXX_SPI)	+= mc13xxx-spi.o
  obj-$(CONFIG_MFD_MC13XXX_I2C)	+= mc13xxx-i2c.o
  
  obj-$(CONFIG_MFD_CORE)		+= mfd-core.o
 +obj-$(CONFIG_MFD_CSWARP)	+= cswarp-core.o
++obj-$(CONFIG_MFD_CSWARP)	+= cswarp-ctl.o
  
  ocelot-soc-objs			:= ocelot-core.o ocelot-spi.o
  obj-$(CONFIG_MFD_OCELOT)	+= ocelot-soc.o

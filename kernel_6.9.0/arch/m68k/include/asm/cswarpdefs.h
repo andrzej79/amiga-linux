@@ -53,6 +53,7 @@
 #define WARP_BLT_SR			WARP_MCLK(0x24)
 #define WARP_BLT_SRC_BPR		WARP_MCLK(0x28)	/* 14 bit */
 #define WARP_BLT_DST_BPR		WARP_MCLK(0x2C)	/* 14 bit */
+#define WARP_ARTIX_TEMP			WARP_MCLK(0x34)	/* FPGA XADC temperature, 12 bit */
 #define WARP_DIV_Y_CR			WARP_MCLK(0x30)
 #define WARP_ARTIX_TEMP			WARP_MCLK(0x34)
 #define WARP_GENLOCK_SR			WARP_MCLK(0x98)	/* read only */
@@ -136,13 +137,23 @@
 
 /* ---- SysCfg block -------------------------------------------------------- */
 /*
- * Registers above +0x04 exist only from SYSCFG_ID_L2CFG on; on older images a
- * write there is never acknowledged and hangs the bus.  Linux reads +0x00 and
- * writes only CCTRL (the L2 flush, around QSDMA transfers).
+ * Registers above +0x04 exist only from the id that names them on; on older
+ * images an access there is never acknowledged and hangs the bus, so check
+ * the id first.  CCTRL is written around QSDMA transfers (the L2 flush), the
+ * L2 policy and counters by cswarp-ctl.
  */
 #define WARP_SYSCFG_ID			(WARP_OFFSET_SYSCFG + 0x00)
 #define WARP_SYSCFG_CCTRL		(WARP_OFFSET_SYSCFG + 0x04)
+#define WARP_SYSCFG_L2CFG		(WARP_OFFSET_SYSCFG + 0x0C)	/* >= SYSCFG_ID_L2CFG */
+#define WARP_SYSCFG_L2ACC		(WARP_OFFSET_SYSCFG + 0x10)	/* >= SYSCFG_ID_L2STATS; reading latches all four */
+#define WARP_SYSCFG_L2HIT		(WARP_OFFSET_SYSCFG + 0x14)
+#define WARP_SYSCFG_L2MISS		(WARP_OFFSET_SYSCFG + 0x18)
+#define WARP_SYSCFG_L2WB		(WARP_OFFSET_SYSCFG + 0x1C)
 #define SYSCFG_CCTRL_L2FLUSHINV		BIT(31)	/* write back and invalidate the whole L2 */
+#define SYSCFG_L2CFG_LEGACY		0x00000000	/* rotating replacement pointer */
+#define SYSCFG_L2CFG_LRU		0x00000001
+#define SYSCFG_L2CFG_MASK		0x00000007
+#define SYSCFG_L2CFG_STATCLR		BIT(31)	/* self-clearing: zero the counters */
 #define SYSCFG_ID_ORIGINAL		0x01234567
 #define SYSCFG_ID_L2CFG			0x01234568
 #define SYSCFG_ID_L2STATS		0x01234569	/* oldest image with the video changes we rely on */
