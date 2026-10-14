@@ -1,7 +1,8 @@
 # Prerequisites
 *.d
-# ...but not systemd-style drop-in directories in the rootfs overlay
+# ...but not config directories in the rootfs overlay (tmpfiles.d, *.conf.d, ...)
 !*.conf.d/
+!overlay/**/*.d/
 
 # Object files
 *.o
