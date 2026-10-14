@@ -37,24 +37,37 @@ key() { plutil -extract "$1" raw -o - - <<<"$plist" 2>/dev/null || echo ""; }
 
 whole=$(key WholeDisk)
 internal=$(key Internal)
+removable=$(key RemovableMedia)
 external=$(key RemovableMediaOrExternalDevice)
 size=$(key TotalSize)
 bsize=$(key DeviceBlockSize)
 media=$(key MediaName)
 proto=$(key BusProtocol)
 
-# ---- safety checks: refuse anything that is not a whole, external, removable disk
+# ---- what the image needs: a whole disk with 512-byte sectors and a sane size
 [ "$whole" = "true" ] || die "/dev/$id is not a whole disk"
-[ "$internal" = "false" ] || die "/dev/$id is an internal disk - refusing"
-[ "$external" = "true" ] || die "/dev/$id is not removable/external - refusing"
 [ "$bsize" = "512" ] || die "/dev/$id has $bsize-byte blocks, expected 512"
 [ -n "$size" ] && [ "$size" -gt $((512 * 1024 * 1024)) ] || die "/dev/$id: implausible size '$size'"
-[ "$size" -le $((256 * 1024 * 1024 * 1024)) ] || die "/dev/$id is larger than 256 GB - refusing (not a CF card?)"
-boot_disk=$(diskutil info -plist / | plutil -extract ParentWholeDisk raw -o - - 2>/dev/null || true)
-[ "$id" != "$boot_disk" ] || die "/dev/$id holds the running system - refusing"
-if diskutil apfs list 2>/dev/null | grep -qE "Physical Store Disk:[[:space:]]+${id}(s[0-9]+)?$"; then
-    die "/dev/$id is an APFS physical store - refusing"
-fi
+
+# ---- safety checks before writing: only a removable medium, never the system.
+# A card in a built-in reader (Mac Studio SDXC) is Internal but RemovableMedia;
+# an internal SSD never has removable media.
+write_checks() {
+    if [ "$internal" = "true" ]; then
+        [ "$removable" = "true" ] || die "/dev/$id is an internal disk - refusing"
+    else
+        [ "$external" = "true" ] || die "/dev/$id is not removable/external - refusing"
+    fi
+    [ "$size" -le $((256 * 1024 * 1024 * 1024)) ] || die "/dev/$id is larger than 256 GB - refusing (not a CF card?)"
+    local boot_disk
+    boot_disk=$(diskutil info -plist / | plutil -extract ParentWholeDisk raw -o - - 2>/dev/null || true)
+    [ "$id" != "$boot_disk" ] || die "/dev/$id holds the running system - refusing"
+    if diskutil apfs list 2>/dev/null | grep -qE "Physical Store Disk:[[:space:]]+${id}(s[0-9]+)?$"; then
+        die "/dev/$id is an APFS physical store - refusing"
+    fi
+}
+# fail early, before a long image build, unless only the image is wanted
+[ "$image_only" = 1 ] || write_checks
 
 blocks=$((size / 512))
 echo "Card: /dev/$id  \"$media\"  $proto  $size bytes ($blocks sectors)"
@@ -74,7 +87,8 @@ if [ "$image_only" = 1 ]; then
     exit 0
 fi
 
-# ---- confirm
+# ---- confirm (the checks again: the disk may have changed during the build)
+write_checks
 echo
 echo "Current contents of /dev/$id:"
 diskutil list "/dev/$id" | sed 's/^/  /'

@@ -208,9 +208,31 @@ rdbtool -f "$W/disk.img" create chs=$CYLS,$HEADS,$SECS + init rdb_cyls=$RDB_CYLS
     + add start=$LBOOT_LO end=$LBOOT_HI name=LBOOT dostype=DOS3 bootable=0 \
           max_transfer=0x1fe00 mask=0x7ffffffe \
     + add start=$SWAP_LO end=$SWAP_HI name=SWAP dostype=0x53575000 automount=0 \
-    + add start=$ROOT_LO end=$ROOT_HI name=LINUX dostype=0x4c4e5800 automount=0 \
-    + import DH0 "$W/dh0.hdf" + import LBOOT "$W/lboot.hdf" \
-    + import SWAP "$W/swap.img" + import LINUX "$W/root.img"
+    + add start=$ROOT_LO end=$ROOT_HI name=LINUX dostype=0x4c4e5800 automount=0
+# The partition contents go in with dd conv=sparse rather than rdbtool import:
+# import writes every block, zeros too, so a big card needs the whole card's
+# size free in the build volume (a 64 GB card did not fit).  Sparse, disk.img
+# only takes what the partitions really hold.
+put_part() {  # put_part <name> <image> <first cyl> <last cyl>
+    local want got
+    want=$(part_bytes "$3" "$4")
+    got=$(stat -c %s "$2")
+    [ "$got" = "$want" ] || die "$1: image is $got bytes, the partition $want"
+    local off=$(( $3 * CYL_BLOCKS * 512 )) mib=1048576
+    dd if="$2" of="$W/disk.img" bs=4M oflag=seek_bytes seek=$off conv=notrunc,sparse status=none
+    # read back the first and the last MiB of the partition
+    cmp -n $mib "$2" <(dd if="$W/disk.img" bs=$mib iflag=skip_bytes,count_bytes skip=$off count=$mib status=none) ||
+        die "$1: first MiB differs after writing"
+    cmp -n $mib <(dd if="$2" bs=$mib iflag=skip_bytes,count_bytes skip=$(( got - mib )) count=$mib status=none) \
+        <(dd if="$W/disk.img" bs=$mib iflag=skip_bytes,count_bytes skip=$(( off + got - mib )) count=$mib status=none) ||
+        die "$1: last MiB differs after writing"
+    echo "wrote $1 ($(( got >> 20 )) MiB at cylinder $3)"
+}
+put_part DH0 "$W/dh0.hdf" $DH0_LO $DH0_HI
+put_part LBOOT "$W/lboot.hdf" $LBOOT_LO $LBOOT_HI
+put_part SWAP "$W/swap.img" $SWAP_LO $SWAP_HI
+put_part LINUX "$W/root.img" $ROOT_LO $ROOT_HI
+echo "disk.img: $(du -h "$W/disk.img" | cut -f1) allocated of $(( $(stat -c %s "$W/disk.img") >> 20 )) MiB"
 rdbtool -r "$W/disk.img" info
 rm -f "$W/dh0.hdf" "$W/lboot.hdf" "$W/swap.img" "$W/root.img"
 
