@@ -97,6 +97,7 @@ MODULE_PARM_DESC(max_kb, "Largest request in KB (also the readahead window)");
 #define CWD_BUSY_RETRY_MS	20	/* a unit still finishing a cancelled operation */
 #define CWD_BUSY_RETRIES	3000	/* ... for up to a minute, as cswarp.library */
 #define CWD_STATUS_POLL_MS	100
+#define CWD_GONE_POLLS		2	/* polls that must agree before a disk is deleted */
 #define CWD_QSDMA_TC_POLLS	100000	/* reads of the CSR before giving up on TC */
 
 enum { CWD_SLOT_SD, CWD_SLOT_USB0, CWD_SLOT_USB1, CWD_SLOTS };
@@ -126,6 +127,7 @@ struct cwd_stats {
 	unsigned long zc_runs;		/* ... in this many fetches */
 	unsigned long zc_frag;		/* bounced: too many runs */
 	unsigned long zc_align;		/* bounced: a run off L2 lines or out of reach */
+	unsigned long zc_refused;	/* the board refused a run: bounced after all */
 };
 
 /* Add the time since *t to bucket, and restart *t */
@@ -167,6 +169,7 @@ struct cwd_slot {
 	u64 sectors;
 	u32 change_cnt;
 	bool warned_bsize;
+	unsigned int gone_polls;	/* polls in a row that disagreed with the disk */
 
 	struct cwd_stats stats;
 };
@@ -258,9 +261,11 @@ static void cwd_rq_copy(struct request *rq, unsigned int pos, void __iomem *io, 
 		pos += n;
 		len -= n;
 		off += bv.bv_len;
+		/* rq_for_each_segment() is two loops (bios, then segments): break leaves only one */
 		if (!len)
-			break;
+			goto done;
 	}
+done:
 	WARN_ON_ONCE(len);
 }
 
@@ -630,6 +635,29 @@ struct cwd_run {
  * The request's bytes [pos, pos + len) as physically contiguous runs the
  * engine can write, at most max of them.  0 when they do not qualify.
  */
+/* The request's segments, once per boot: for a mapping that went wrong */
+static void cwd_zc_dump(struct cwd_slot *s, struct request *rq, const char *why)
+{
+	static bool done;
+	struct req_iterator iter;
+	struct bio_vec bv;
+	unsigned int off = 0, nr = 0;
+
+	if (done)
+		return;
+	done = true;
+	dev_warn(s->cd->dev, "%s: zero-copy map: %s; request %u bytes at sector %llu, op 0x%x flags 0x%x\n",
+		 s->name, why, blk_rq_bytes(rq), (unsigned long long)blk_rq_pos(rq), req_op(rq), rq->cmd_flags);
+	rq_for_each_segment(bv, rq, iter) {
+		if (nr++ < 48)
+			dev_warn(s->cd->dev, "%s:   seg +%u len %u page-off %u phys 0x%08lx\n", s->name, off,
+				 bv.bv_len, bv.bv_offset,
+				 (unsigned long)(page_to_phys(bv.bv_page) + bv.bv_offset));
+		off += bv.bv_len;
+	}
+	dev_warn(s->cd->dev, "%s:   %u segments, %u bytes\n", s->name, nr, off);
+}
+
 static int cwd_zc_map(struct cwd_slot *s, struct request *rq, unsigned int pos, unsigned int len,
 		      struct cwd_run *runs, int max)
 {
@@ -648,6 +676,11 @@ static int cwd_zc_map(struct cwd_slot *s, struct request *rq, unsigned int pos, 
 		}
 		skip = pos - off;
 		k = min(bv.bv_len - skip, len);
+		if (!k) {
+			/* cannot happen for a sane segment: show it, and bounce */
+			cwd_zc_dump(s, rq, "empty piece");
+			return 0;
+		}
 		phys = page_to_phys(bv.bv_page) + bv.bv_offset + skip;
 		if (n && runs[n - 1].phys + runs[n - 1].len == phys) {
 			runs[n - 1].len += k;
@@ -663,11 +696,17 @@ static int cwd_zc_map(struct cwd_slot *s, struct request *rq, unsigned int pos, 
 		pos += k;
 		len -= k;
 		off += bv.bv_len;
+		/*
+		 * Not break: rq_for_each_segment() is two loops (bios, then each
+		 * bio's segments), so a break only ends this bio and the next one
+		 * would add empty pieces - the board refused such a zero-length
+		 * run past the end of the chunk.
+		 */
 		if (!len)
-			break;
+			goto mapped;
 	}
-	if (len)
-		return 0;
+	return 0;	/* the request ended before the chunk did */
+mapped:
 	/*
 	 * Whole L2 lines only: a line shared with other memory can be dirtied
 	 * by a CPU write there during the transfer, and the flush after it
@@ -700,9 +739,34 @@ static int cwd_fetch_dma(struct cwd_slot *s, u16 seq, u32 chunk, u32 len,
 		n = cwd_zc_map(s, rq, rpos, len, runs,
 			       clamp_t(u32, len / (zc_kb * 1024), 1, CWD_ZC_MAX_RUNS));
 	if (n) {
+		u32 sum = 0;
+
+		for (i = 0; i < n; i++)
+			sum += runs[i].len;
+		if (WARN_ONCE(sum != len, "%s: zero-copy runs cover %u of %u bytes\n", s->name, sum, len))
+			n = 0;
+	}
+	if (n) {
 		for (i = 0; i < n; i++) {
 			err = cwd_fetch_dma_run(s, seq, chunk, off, runs[i].len, runs[i].phys,
 						i == n - 1, rq, p);
+			if (err == -EIO) {
+				/*
+				 * Refused: say exactly what was asked, then fetch the
+				 * whole chunk through the bounce buffer - it is only
+				 * released by its last fetch, so it is still there.
+				 */
+				int j;
+
+				dev_warn(s->cd->dev, "%s: zero-copy fetch refused: chunk %u (%u bytes, request +%u, %u bytes), run %d of %d\n",
+					 s->name, chunk, len, rpos, blk_rq_bytes(rq), i, n);
+				for (j = 0; j < n; j++)
+					dev_warn(s->cd->dev, "%s:   run %d: phys 0x%08lx len %u\n",
+						 s->name, j, runs[j].phys, runs[j].len);
+				cwd_zc_dump(s, rq, "fetch refused");
+				s->stats.zc_refused++;
+				goto bounce;
+			}
 			if (err)
 				return err;
 			off += runs[i].len;
@@ -712,6 +776,8 @@ static int cwd_fetch_dma(struct cwd_slot *s, u16 seq, u32 chunk, u32 len,
 		s->stats.dma_reads++;
 		return 0;
 	}
+
+bounce:
 
 	err = cwd_fetch_dma_run(s, seq, chunk, 0, len, s->bounce_phys + half, true, rq, p);
 	if (err)
@@ -1016,8 +1082,21 @@ static void cwd_update(struct cwd_slot *s, bool present, u64 sectors, u32 bsize,
 		present = false;
 
 	if (s->disk) {
-		if (present && sectors == s->sectors && change_cnt == s->change_cnt)
+		if (present && sectors == s->sectors && change_cnt == s->change_cnt) {
+			s->gone_polls = 0;
 			return;
+		}
+		/*
+		 * One odd answer (a card the firmware is re-initialising after
+		 * an error) must not pull a mounted root filesystem away; a
+		 * medium that really went is still gone at the next poll.
+		 */
+		if (++s->gone_polls < CWD_GONE_POLLS) {
+			cswarp_dbg(CSWARP_DBG_DISK, s->cd->dev, "%s: %s at one poll, waiting for the next\n",
+				   s->name, present ? "changed" : "gone");
+			return;
+		}
+		s->gone_polls = 0;
 		cwd_del_disk(s, present ? "medium changed" : "medium removed");
 	}
 	if (present)
@@ -1133,7 +1212,7 @@ static ssize_t disk_stats_show(struct device *dev, struct device_attribute *attr
 				     "  errors %lu timeouts %lu cancels %lu busy_retries %lu media_changes %lu\n"
 				     "  dma %s, dma_reads %lu dma_writes %lu dma_errors %lu\n"
 				     "  us: total %llu submit %llu wait %llu xfer %llu tc %llu cache %llu copy %llu\n"
-				     "  zc_chunks %lu zc_runs %lu zc_frag %lu zc_align %lu\n",
+				     "  zc_chunks %lu zc_runs %lu zc_frag %lu zc_align %lu zc_refused %lu\n",
 				     s->name, s->unit, s->chunk_bytes,
 				     s->disk ? "present" : "empty", (unsigned long long)s->sectors,
 				     st->reads, st->bytes_read, st->writes, st->bytes_written,
@@ -1143,7 +1222,7 @@ static ssize_t disk_stats_show(struct device *dev, struct device_attribute *attr
 				     st->dma_reads, st->dma_writes, st->dma_errors,
 				     st->us_total, st->us_submit, st->us_wait, st->us_xfer,
 				     st->us_tc, st->us_cache, st->us_copy,
-				     st->zc_chunks, st->zc_runs, st->zc_frag, st->zc_align);
+				     st->zc_chunks, st->zc_runs, st->zc_frag, st->zc_align, st->zc_refused);
 	}
 	return len;
 }
