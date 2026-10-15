@@ -1,0 +1,6 @@
+#!/bin/sh
+# doom [fbdoom options]: shareware Doom on the console (run it on a VT,
+# not over ssh).  Config and savegames: ~/.fbdoom/
+#   doom                  320x200 window in the current console mode
+#   doom -mode 640x480    full screen, scaled x2
+exec /usr/bin/fbdoom -iwad /usr/share/games/doom/doom1.wad "$@"

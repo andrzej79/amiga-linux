@@ -1,0 +1,138 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] Faster rendering on 68040/68060
+
+- FixedMul: ((int64_t) a * b) >> 16 became a libgcc __muldi3 call (the
+  68060 traps the 64-bit muls.l).  Inline it, built from four 32-bit
+  multiplies; the result is bit-identical (demos stay in sync).
+- R_DrawColumn/R_DrawSpan: keep source and colormap in locals; a store
+  through the byte pointer dest may alias the globals, so GCC reloaded
+  them for every pixel.
+- R_DrawColumn on 68040/68060: an assembler loop with the texture
+  position pre-shifted by 9 bits, so the texel index is one shift.
+
+Timedemo demo1 on a 68060 at 107 MHz, 320x200: 52.9 -> 63.7 fps.
+
+diff --git a/fbdoom/m_fixed.c b/fbdoom/m_fixed.c
+index 23f6ff3..2ea100a 100644
+--- a/fbdoom/m_fixed.c
++++ b/fbdoom/m_fixed.c
+@@ -30,13 +30,7 @@
+ 
+ // Fixme. __USE_C_FIXED__ or something.
+ 
+-fixed_t
+-FixedMul
+-( fixed_t	a,
+-  fixed_t	b )
+-{
+-    return ((int64_t) a * (int64_t) b) >> FRACBITS;
+-}
++// FixedMul is inline, in m_fixed.h
+ 
+ 
+ 
+diff --git a/fbdoom/m_fixed.h b/fbdoom/m_fixed.h
+index 733b290..e8f6331 100644
+--- a/fbdoom/m_fixed.h
++++ b/fbdoom/m_fixed.h
+@@ -31,7 +31,19 @@
+ 
+ typedef int fixed_t;
+ 
+-fixed_t FixedMul	(fixed_t a, fixed_t b);
++#include <stdint.h>
++
++// ((int64_t) a * b) >> FRACBITS from four 32-bit multiplies: the 68060
++// traps the 64-bit muls.l, so the int64_t version is a libgcc call.
++// Exact (bit-identical) for all inputs.
++static inline fixed_t FixedMul(fixed_t a, fixed_t b)
++{
++    int32_t ah = a >> 16, bh = b >> 16;
++    uint32_t al = a & 0xffff, bl = b & 0xffff;
++
++    return (fixed_t) ((uint32_t) (ah * bh) << 16) + ah * (int32_t) bl
++         + (int32_t) al * bh + (fixed_t) ((al * bl) >> 16);
++}
+ fixed_t FixedDiv	(fixed_t a, fixed_t b);
+ 
+ 
+diff --git a/fbdoom/r_draw.c b/fbdoom/r_draw.c
+index 9271bcd..28c3df5 100644
+--- a/fbdoom/r_draw.c
++++ b/fbdoom/r_draw.c
+@@ -132,16 +132,47 @@ void R_DrawColumn (void)
+     // Inner loop that does the actual texture mapping,
+     //  e.g. a DDA-lile scaling.
+     // This is as fast as it gets.
+-    do 
++    {
++	// locals: a store through dest (a byte pointer) may alias the
++	// globals, so GCC would reload them for every pixel
++	const byte *source = dc_source;
++	const lighttable_t *colormap = dc_colormap;
++
++#if defined(__mc68040__) || defined(__mc68060__)
++	// frac pre-shifted by 9: the 7-bit texel index is frac >> 25, no mask.
++	// texel's upper bits stay zero, so it indexes the colormap as is.
++	{
++	    unsigned f = (unsigned) frac << 9, s = (unsigned) fracstep << 9;
++	    unsigned idx, texel = 0;
++	    int n = count;              // pixels - 1, < 200: fits dbf's word
++
++	    __asm__ volatile (
++		"1:\n\t"
++		"move.l	%[f],%[idx]\n\t"
++		"lsr.l	%[sh],%[idx]\n\t"
++		"add.l	%[s],%[f]\n\t"
++		"move.b	(%[src],%[idx].l),%[texel]\n\t"
++		"move.b	(%[cm],%[texel].l),(%[d])\n\t"
++		"lea	320(%[d]),%[d]\n\t"
++		"dbf	%[n],1b"
++		: [f] "+d" (f), [d] "+a" (dest), [n] "+d" (n),
++		  [idx] "=&d" (idx), [texel] "+d" (texel)
++		: [s] "d" (s), [src] "a" (source), [cm] "a" (colormap), [sh] "d" (25)
++		: "memory", "cc");
++	}
++#else
++    do
+     {
+ 	// Re-map color indices from wall texture column
+ 	//  using a lighting/special effects LUT.
+-	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
++	*dest = colormap[source[(frac>>FRACBITS)&127]];
+ 	
+ 	dest += SCREENWIDTH; 
+ 	frac += fracstep;
+ 	
+-    } while (count--); 
++    } while (count--);
++#endif
++    }
+ } 
+ 
+ 
+@@ -622,6 +653,10 @@ void R_DrawSpan (void)
+     // We do not check for zero spans here?
+     count = ds_x2 - ds_x1;
+ 
++    {
++	const byte *source = ds_source;
++	const lighttable_t *colormap = ds_colormap;
++
+     do
+     {
+ 	// Calculate current texture index in u,v.
+@@ -631,11 +666,12 @@ void R_DrawSpan (void)
+ 
+ 	// Lookup pixel from flat texture tile,
+ 	//  re-index using light/colormap.
+-	*dest++ = ds_colormap[ds_source[spot]];
++	*dest++ = colormap[source[spot]];
+ 
+         position += step;
+ 
+     } while (count--);
++    }
+ }
+ 
+ 

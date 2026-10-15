@@ -1,0 +1,14 @@
+config BR2_PACKAGE_FBDOOM
+	bool "fbdoom"
+	help
+	  fbDOOM: the Doom engine (Chocolate Doom based) on the Linux
+	  console frame buffer and keyboard, with the shareware
+	  doom1.wad (episode 1) from Debian's doom-wad-shareware.
+
+	  Run "doom" from a virtual console: a 320x200 window in the
+	  current console mode, or "doom -mode 640x480" for full screen
+	  (scaled x2); -scaling N, -pckeys for a USB keyboard alone.
+	  Patched for big-endian m68k, the Amiga keyboard and speed on
+	  the 68040/68060.
+
+	  https://github.com/maximevince/fbDOOM

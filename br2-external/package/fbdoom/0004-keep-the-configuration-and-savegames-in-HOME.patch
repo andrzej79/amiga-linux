@@ -1,0 +1,31 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] Keep the configuration and savegames in $HOME/.fbdoom
+
+GetDefaultConfigDir() had $HOME replaced by a hard-coded /mnt (a hack
+for Frosted OS), and the directory name came from PACKAGE_TARNAME,
+which is "fdoom.tar": the config and savegames went to /mnt/.fdoom.tar/.
+Use $HOME/.fbdoom/.
+
+diff --git a/fbdoom/m_config.c b/fbdoom/m_config.c
+index 31ac7a6..4c7c1c5 100644
+--- a/fbdoom/m_config.c
++++ b/fbdoom/m_config.c
+@@ -2051,8 +2051,7 @@ static char *GetDefaultConfigDir(void)
+     char *homedir;
+     char *result;
+ 
+-    // frosted HACK - homedir = getenv("HOME");
+-    homedir = "/mnt";
++    homedir = getenv("HOME");
+ 
+     if (homedir != NULL)
+     {
+@@ -2060,7 +2059,7 @@ static char *GetDefaultConfigDir(void)
+         // homedir
+ 
+         result = M_StringJoin(homedir, DIR_SEPARATOR_S,
+-                              "." PACKAGE_TARNAME, DIR_SEPARATOR_S, NULL);
++                              ".fbdoom", DIR_SEPARATOR_S, NULL);
+ 
+         return result;
+     }

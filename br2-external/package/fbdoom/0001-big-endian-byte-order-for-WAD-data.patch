@@ -1,0 +1,35 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] Byte order for WAD data on big-endian machines
+
+i_swap.h hard-coded SYS_LITTLE_ENDIAN and SHORT()/LONG() did not swap,
+so on a big-endian machine (m68k) every WAD lump was read wrongly.
+Swap on big-endian hosts, decided from the compiler's __BYTE_ORDER__.
+
+diff --git a/fbdoom/i_swap.h b/fbdoom/i_swap.h
+index d1fd754..aa4dcfa 100644
+--- a/fbdoom/i_swap.h
++++ b/fbdoom/i_swap.h
+@@ -44,11 +44,23 @@
+ 
+ #else
+ 	
++// WAD files are stored little endian.
++#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++
++#define SHORT(x)  ((signed short) __builtin_bswap16((unsigned short) (x)))
++#define LONG(x)   ((signed int) __builtin_bswap32((unsigned int) (x)))
++
++#define SYS_BIG_ENDIAN
++
++#else
++
+ #define SHORT(x)  ((signed short) (x))
+ #define LONG(x)   ((signed int) (x))
+ 
+ #define SYS_LITTLE_ENDIAN
+ 
++#endif
++
+ #endif
+ #endif
+ 

@@ -1,0 +1,591 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] Linux console frame buffer and keyboard
+
+Video (i_video_fbdev.c):
+- mmap the frame buffer and draw into the visible area (the console
+  pans the display), centred; -scaling N (default 1: a 320x200
+  window), 8 bpp through the hardware palette (FBIOPUTCMAP), 16/32 bpp
+  through a lookup table; lines are copied with move16 on 68040/68060.
+- -mode WxH switches to one of the driver's modes (by name, through
+  /sys/class/graphics/fb0/mode, so the driver supplies the timings)
+  and scales to fit; the console's mode, palette and KD_TEXT are
+  restored at exit and on fatal signals.
+- the tty is switched to KD_GRAPHICS so fbcon stays off the screen.
+
+Keyboard (i_input_tty.c):
+- KDGKBTYPE stores one byte; reading it into an int failed the
+  keyboard check on big-endian machines.
+- amikbd reports raw Amiga scancodes as keycodes (the console keymap is
+  remapped at boot): use an Amiga table when an amiga-keyboard input
+  device exists, -pckeys for the PC table.
+- kbd_restore() puts the keyboard mode and termios back (called from the
+  video cleanup too); Backspace no longer quits the game.
+
+I_Error (i_system.c) ended in an endless loop instead of exiting (and
+-timedemo reports its result through I_Error).
+
+diff --git a/fbdoom/i_input_tty.c b/fbdoom/i_input_tty.c
+index 95e1b60..b3584a5 100644
+--- a/fbdoom/i_input_tty.c
++++ b/fbdoom/i_input_tty.c
+@@ -54,6 +54,28 @@ int vanilla_keyboard_mapping = 1;
+ static int shiftdown = 0;
+ 
+ // Lookup table for mapping AT keycodes to their doom keycode
++/* The Amiga keyboard driver (amikbd) reports raw Amiga scancodes as
++ * keycodes; the console keymap is remapped for it at boot, but in
++ * K_MEDIUMRAW we see the raw codes. */
++static const char amiga_to_doom[0x68] =
++{
++    /* 0x00 */ '`', '1', '2', '3', '4', '5', '6', '7',
++    /* 0x08 */ '8', '9', '0', '-', '=', '\\', 0, KEYP_0,
++    /* 0x10 */ 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i',
++    /* 0x18 */ 'o', 'p', '[', ']', 0, KEYP_1, KEYP_2, KEYP_3,
++    /* 0x20 */ 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k',
++    /* 0x28 */ 'l', ';', '\'', 0, 0, KEYP_4, KEYP_5, KEYP_6,
++    /* 0x30 */ 0, 'z', 'x', 'c', 'v', 'b', 'n', 'm',
++    /* 0x38 */ ',', '.', '/', 0, KEYP_PERIOD, KEYP_7, KEYP_8, KEYP_9,
++    /* 0x40 */ KEY_USE, KEY_BACKSPACE, KEY_TAB, KEYP_ENTER, KEY_ENTER, KEY_ESCAPE, KEY_DEL, 0,
++    /* 0x48 */ 0, 0, KEYP_MINUS, 0, KEY_UPARROW, KEY_DOWNARROW, KEY_RIGHTARROW, KEY_LEFTARROW,
++    /* 0x50 */ KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8,
++    /* 0x58 */ KEY_F9, KEY_F10, 0, 0, KEYP_DIVIDE, KEYP_MULTIPLY, KEYP_PLUS, KEY_PAUSE, /* Help = pause */
++    /* 0x60 */ KEY_RSHIFT, KEY_RSHIFT, KEY_CAPSLOCK, KEY_FIRE, KEY_LALT, KEY_RALT, 0, 0,
++};
++
++static boolean amiga_keys;
++
+ static const char at_to_doom[] =
+ {
+     /* 0x00 */ 0x00,
+@@ -234,7 +256,7 @@ static const char shiftxform[] =
+ 
+ int tty_is_kbd(int fd)
+ {
+-    int data = 0;
++    char data = 0;     /* KDGKBTYPE stores one byte */
+ 
+     if (ioctl(fd, KDGKBTYPE, &data) != 0)
+         return 0;
+@@ -255,6 +277,17 @@ static int old_mode = -1;
+ static struct termios old_term;
+ static int kb = -1; /* keyboard file descriptor */
+ 
++/* Put the keyboard mode and terminal settings back (also from atexit and
++ * fatal signal handlers, see i_video_fbdev.c) */
++void kbd_restore(void)
++{
++    if (old_mode != -1) {
++        ioctl(kb, KDSKBMODE, old_mode);
++        tcsetattr(kb, 0, &old_term);
++        old_mode = -1;
++    }
++}
++
+ void kbd_shutdown(void)
+ {
+     /* Shut down nicely. */
+@@ -263,10 +296,7 @@ void kbd_shutdown(void)
+     fflush(stdout);
+ 
+     printf("Exiting normally.\n");
+-    if (old_mode != -1) {
+-        ioctl(kb, KDSKBMODE, old_mode);
+-        tcsetattr(kb, 0, &old_term);
+-    }
++    kbd_restore();
+ 
+     if (kb > 3)
+         close(kb);
+@@ -353,7 +383,7 @@ static int kbd_init(void)
+     flags = fcntl(kb, F_GETFL, 0);
+     fcntl(kb, F_SETFL, flags | O_NONBLOCK);
+ 
+-    printf("Ready to read keycodes. Press Backspace to exit.\n");
++    printf("Ready to read keycodes.\n");
+ 
+     return 0;
+ }
+@@ -378,6 +408,8 @@ int kbd_read(int *pressed, unsigned char *key)
+ 
+ static unsigned char TranslateKey(unsigned char key)
+ {
++    if (amiga_keys)
++        return key < sizeof(amiga_to_doom) ? amiga_to_doom[key] : 0;
+     if (key < sizeof(at_to_doom))
+         return at_to_doom[key];
+     else
+@@ -420,7 +452,7 @@ static void UpdateShiftStatus(int pressed, unsigned char key)
+         change = -1;
+     }
+ 
+-    if (key == 0x2a || key == 0x36) {
++    if (TranslateKey(key) == KEY_RSHIFT) {
+         shiftdown += change;
+     }
+ }
+@@ -436,11 +468,6 @@ void I_GetEvent(void)
+     
+     while (kbd_read(&pressed, &key))
+     {
+-        if (key == 0x0E) {
+-            kbd_shutdown();
+-            I_Quit();
+-        }
+-
+         UpdateShiftStatus(pressed, key);
+ 
+         // process event
+@@ -493,6 +520,19 @@ void I_GetEvent(void)
+ 
+ void I_InitInput(void)
+ {
++    FILE *f;
++    char line[256];
++
++    /* Amiga scancodes when the Amiga keyboard is present, unless -pckeys
++     * (a USB keyboard alone sends standard keycodes) */
++    if (!M_CheckParm("-pckeys") && (f = fopen("/proc/bus/input/devices", "r")) != NULL) {
++        while (fgets(line, sizeof(line), f))
++            if (strstr(line, "Name=\"amiga-keyboard\""))
++                amiga_keys = true;
++        fclose(f);
++    }
++    printf("I_InitInput: %s keycodes\n", amiga_keys ? "Amiga" : "PC");
++
+     kbd_init();
+ 
+     //UpdateFocus();
+diff --git a/fbdoom/i_system.c b/fbdoom/i_system.c
+index 5d00091..eeca384 100644
+--- a/fbdoom/i_system.c
++++ b/fbdoom/i_system.c
+@@ -403,7 +403,7 @@ void I_Error (char *error, ...)
+         entry = entry->next;
+     }
+ 
+-    exit_gui_popup = !M_ParmExists("-nogui");
++    exit_gui_popup = false;    /* no GUI on the console */
+ 
+     // Pop up a GUI dialog box to show the error message, if the
+     // game was not run from the console (and the user will
+@@ -457,13 +457,9 @@ void I_Error (char *error, ...)
+     // abort();
+ #if ORIGCODE
+     SDL_Quit();
++#endif
+ 
+     exit(-1);
+-#else
+-    while (true)
+-    {
+-    }
+-#endif
+ }
+ 
+ //
+diff --git a/fbdoom/i_video_fbdev.c b/fbdoom/i_video_fbdev.c
+index c6e5925..805d04c 100644
+--- a/fbdoom/i_video_fbdev.c
++++ b/fbdoom/i_video_fbdev.c
+@@ -47,6 +47,14 @@ rcsid[] = "$Id: i_x.c,v 1.6 1997/02/03 22:45:10 b1 Exp $";
+ #include <sys/socket.h>
+ #include <linux/fb.h>
+ #include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <signal.h>
++#include <string.h>
++#include <stdint.h>
++#include <limits.h>
++#include <stdio.h>
++#include <linux/kd.h>
++#include "i_system.h"
+ 
+ //#define CMAP256
+ 
+@@ -158,49 +166,146 @@ void cmap_to_fb(uint8_t * out, uint8_t * in, int in_pixels)
+     }
+ }
+ 
++/* Frame buffer state */
++static struct fb_fix_screeninfo fb_fix;
++static byte *fb_mem;                /* mmap of the whole frame buffer */
++static byte *fb_origin;             /* top-left pixel of Doom's window */
++static int fb_bytespp;
++static uint32_t fb_lut[256];        /* palette index -> pixel (16/32 bpp) */
++static struct fb_cmap fb_saved_cmap;
++static uint16_t fb_saved_r[256], fb_saved_g[256], fb_saved_b[256];
++static boolean fb_cmap_saved;
++static int kd_tty = -1;             /* tty switched to KD_GRAPHICS */
++static struct fb_var_screeninfo fb_saved_var;
++static boolean fb_mode_changed;
++
++extern void kbd_restore(void);
++
++static void I_RestoreConsole(void)
++{
++    kbd_restore();
++    if (fb_mode_changed) {
++        fb_saved_var.activate = FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE;
++        ioctl(fd_fb, FBIOPUT_VSCREENINFO, &fb_saved_var);
++        fb_mode_changed = false;
++    }
++    if (fb_cmap_saved) {
++        ioctl(fd_fb, FBIOPUTCMAP, &fb_saved_cmap);
++        fb_cmap_saved = false;
++    }
++    if (kd_tty >= 0) {
++        ioctl(kd_tty, KDSETMODE, KD_TEXT);
++        kd_tty = -1;
++    }
++}
++
++static void I_FatalSignal(int sig)
++{
++    I_RestoreConsole();
++    signal(sig, SIG_DFL);
++    raise(sig);
++}
++
+ void I_InitGraphics (void)
+ {
+-    int i;
++    int i, xoff, yoff;
+ 
+-    /* Open fbdev file descriptor */
+     fd_fb = open("/dev/fb0", O_RDWR);
+     if (fd_fb < 0)
+-    {
+-        printf("Could not open /dev/fb0");
+-        exit(-1);
+-    }
++        I_Error("Could not open /dev/fb0");
+ 
+-    /* fetch framebuffer info */
+-    ioctl(fd_fb, FBIOGET_VSCREENINFO, &fb);
+-    /* change params if needed */
+-    //ioctl(fd_fb, FBIOPUT_VSCREENINFO, &fb);
+-    printf("I_InitGraphics: framebuffer: x_res: %d, y_res: %d, x_virtual: %d, y_virtual: %d, bpp: %d, grayscale: %d\n",
+-            fb.xres, fb.yres, fb.xres_virtual, fb.yres_virtual, fb.bits_per_pixel, fb.grayscale);
++    if (ioctl(fd_fb, FBIOGET_VSCREENINFO, &fb) || ioctl(fd_fb, FBIOGET_FSCREENINFO, &fb_fix))
++        I_Error("Could not get frame buffer info");
++    fb_saved_var = fb;
+ 
+-    printf("I_InitGraphics: framebuffer: RGBA: %d%d%d%d, red_off: %d, green_off: %d, blue_off: %d, transp_off: %d\n",
+-            fb.red.length, fb.green.length, fb.blue.length, fb.transp.length, fb.red.offset, fb.green.offset, fb.blue.offset, fb.transp.offset);
++    /* Keep fbcon (cursor, console output) off the frame buffer */
++    kd_tty = open("/dev/tty", O_RDWR);
++    if (kd_tty >= 0 && ioctl(kd_tty, KDSETMODE, KD_GRAPHICS) != 0) {
++        close(kd_tty);
++        kd_tty = -1;
++    }
++    atexit(I_RestoreConsole);
++    signal(SIGSEGV, I_FatalSignal);
++    signal(SIGBUS, I_FatalSignal);
++    signal(SIGILL, I_FatalSignal);
++    signal(SIGFPE, I_FatalSignal);
++    signal(SIGTERM, I_FatalSignal);
++    signal(SIGINT, I_FatalSignal);
++    signal(SIGHUP, I_FatalSignal);
++
++    /* -mode WxH: switch the display to one of the driver's modes (with its
++     * timings, by name through sysfs); the console's mode is restored on exit */
++    i = M_CheckParmWithArgs("-mode", 1);
++    if (i > 0) {
++        int w, h;
++        FILE *f;
++        if (sscanf(myargv[i + 1], "%dx%d", &w, &h) != 2)
++            I_Error("-mode: expected WxH, e.g. 640x480");
++        f = fopen("/sys/class/graphics/fb0/mode", "w");
++        if (f == NULL)
++            I_Error("-mode: cannot open /sys/class/graphics/fb0/mode");
++        fb_mode_changed = true;
++        fprintf(f, "U:%dx%dp-60\n", w, h);
++        if (fclose(f) != 0)
++            I_Error("-mode: the frame buffer has no %dx%d@60 mode", w, h);
++        if (ioctl(fd_fb, FBIOGET_VSCREENINFO, &fb) || ioctl(fd_fb, FBIOGET_FSCREENINFO, &fb_fix))
++            I_Error("Could not get frame buffer info");
++        /* our palette, not the console's */
++        fb.bits_per_pixel = fb_saved_var.bits_per_pixel;
++        fb.activate = FB_ACTIVATE_NOW;
++        fb.xoffset = fb.yoffset = 0;
++        ioctl(fd_fb, FBIOPUT_VSCREENINFO, &fb);
++        ioctl(fd_fb, FBIOGET_VSCREENINFO, &fb);
++        ioctl(fd_fb, FBIOGET_FSCREENINFO, &fb_fix);
++    }
+ 
+-    printf("I_InitGraphics: DOOM screen size: w x h: %d x %d\n", SCREENWIDTH, SCREENHEIGHT);
++    if (fb.bits_per_pixel != 8 && fb.bits_per_pixel != 16 && fb.bits_per_pixel != 32)
++        I_Error("Unsupported frame buffer depth %d", fb.bits_per_pixel);
++    fb_bytespp = fb.bits_per_pixel / 8;
+ 
++    fb_mem = mmap(NULL, fb_fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fb, 0);
++    if (fb_mem == MAP_FAILED)
++        I_Error("Could not mmap /dev/fb0");
+ 
++    /* -scaling N: N x N pixels per Doom pixel (default: 1, a 320x200
++     * window; with -mode the largest that fits) */
+     i = M_CheckParmWithArgs("-scaling", 1);
+-    if (i > 0) {
+-        i = atoi(myargv[i + 1]);
+-        fb_scaling = i;
+-        printf("I_InitGraphics: Scaling factor: %d\n", fb_scaling);
+-    } else {
+-        fb_scaling = fb.xres / SCREENWIDTH;
+-        if (fb.yres / SCREENHEIGHT < fb_scaling)
+-            fb_scaling = fb.yres / SCREENHEIGHT;
+-        printf("I_InitGraphics: Auto-scaling factor: %d\n", fb_scaling);
++    fb_scaling = i > 0 ? atoi(myargv[i + 1]) : fb_mode_changed ? 99 : 1;
++    if (fb_scaling < 1)
++        fb_scaling = 1;
++    while (fb_scaling > 1 && (SCREENWIDTH * fb_scaling > fb.xres || SCREENHEIGHT * fb_scaling > fb.yres))
++        fb_scaling--;
++
++    /* Centre the window in the visible part (the console pans the display) */
++    xoff = fb.xoffset + (fb.xres - SCREENWIDTH * fb_scaling) / 2;
++    yoff = fb.yoffset + (fb.yres - SCREENHEIGHT * fb_scaling) / 2;
++    xoff &= ~15 / fb_bytespp;       /* 16-byte aligned rows for move16 */
++    fb_origin = fb_mem + yoff * fb_fix.line_length + xoff * fb_bytespp;
++
++    printf("I_InitGraphics: %dx%d, %d bpp, pitch %d, Doom window %dx%d at %d,%d\n",
++           fb.xres, fb.yres, fb.bits_per_pixel, fb_fix.line_length,
++           SCREENWIDTH * fb_scaling, SCREENHEIGHT * fb_scaling, xoff, yoff);
++
++    if (fb.bits_per_pixel == 8) {
++        fb_saved_cmap.start = 0;
++        fb_saved_cmap.len = 256;
++        fb_saved_cmap.red = fb_saved_r;
++        fb_saved_cmap.green = fb_saved_g;
++        fb_saved_cmap.blue = fb_saved_b;
++        fb_saved_cmap.transp = NULL;
++        fb_cmap_saved = ioctl(fd_fb, FBIOGETCMAP, &fb_saved_cmap) == 0;
+     }
+ 
++    /* Clear the visible screen */
++    for (i = 0; i < fb.yres; i++)
++        memset(fb_mem + (fb.yoffset + i) * fb_fix.line_length + fb.xoffset * fb_bytespp, 0,
++               fb.xres * fb_bytespp);
+ 
+-    /* Allocate screen to draw to */
+-	I_VideoBuffer = (byte*)Z_Malloc (SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);  // For DOOM to draw on
+-	I_VideoBuffer_FB = (byte*)malloc(fb.xres * fb.yres * (fb.bits_per_pixel/8));     // For a single write() syscall to fbdev
++    /* 16-byte aligned: move16 ignores the low address bits */
++    static byte video_buf[SCREENWIDTH * SCREENHEIGHT] __attribute__((aligned(16)));
++    I_VideoBuffer = video_buf;
+ 
+-	screenvisible = true;
++    screenvisible = true;
+ 
+     extern int I_InitInput(void);
+     I_InitInput();
+@@ -208,8 +313,7 @@ void I_InitGraphics (void)
+ 
+ void I_ShutdownGraphics (void)
+ {
+-	Z_Free (I_VideoBuffer);
+-	free(I_VideoBuffer_FB);
++    I_RestoreConsole();
+ }
+ 
+ void I_StartFrame (void)
+@@ -400,50 +504,74 @@ void I_UpdateNoBlit (void)
+ // I_FinishUpdate
+ //
+ 
++/* Copy n bytes (a multiple of 16, both 16-byte aligned) with move16 */
++static inline void copy_move16(void *dst, const void *src, int n)
++{
++#if defined(__mc68040__) || defined(__mc68060__)
++    const void *s = src;
++    void *d = dst;
++    for (n >>= 4; n > 0; n--)
++        __asm__ volatile ("move16 (%0)+,(%1)+" : "+a" (s), "+a" (d) : : "memory");
++#else
++    memcpy(dst, src, n);
++#endif
++}
++
+ void I_FinishUpdate (void)
+ {
+-    int y;
+-    int x_offset, y_offset, x_offset_end;
+-    unsigned char *line_in, *line_out;
+-
+-    /* Offsets in case FB is bigger than DOOM */
+-    /* 600 = fb heigt, 200 screenheight */
+-    /* 600 = fb heigt, 200 screenheight */
+-    /* 2048 =fb width, 320 screenwidth */
+-    y_offset     = (((fb.yres - (SCREENHEIGHT * fb_scaling)) * fb.bits_per_pixel/8)) / 2;
+-    x_offset     = (((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8)) / 2; // XXX: siglent FB hack: /4 instead of /2, since it seems to handle the resolution in a funny way
+-    //x_offset     = 0;
+-    x_offset_end = ((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8) - x_offset;
+-
+-    /* DRAW SCREEN */
+-    line_in  = (unsigned char *) I_VideoBuffer;
+-    line_out = (unsigned char *) I_VideoBuffer_FB;
+-
+-    y = SCREENHEIGHT;
+-
+-    while (y--)
+-    {
+-        int i;
+-        for (i = 0; i < fb_scaling; i++) {
+-            line_out += x_offset;
+-#ifdef CMAP256
+-            for (fb_scaling == 1) {
+-                memcpy(line_out, line_in, SCREENWIDTH); /* fb_width is bigger than Doom SCREENWIDTH... */
++    static byte *line_buf;
++    const byte *in = I_VideoBuffer;
++    byte *out = fb_origin;
++    int y, x, i;
++    int w = SCREENWIDTH * fb_scaling * fb_bytespp;
++
++    if (fb_bytespp == 1 && fb_scaling == 1) {
++        for (y = 0; y < SCREENHEIGHT; y++, in += SCREENWIDTH, out += fb_fix.line_length)
++            copy_move16(out, in, SCREENWIDTH);
++        return;
++    }
++
++    if (!line_buf)
++        line_buf = malloc(w + 16);
++    byte *lb = (byte *)(((uintptr_t)line_buf + 15) & ~15);
++
++    for (y = 0; y < SCREENHEIGHT; y++, in += SCREENWIDTH) {
++        /* expand one Doom line into line_buf, then copy it fb_scaling times */
++        switch (fb_bytespp) {
++        case 1:
++            if (fb_scaling == 2) {
++                uint16_t *o = (uint16_t *)lb;
++                for (x = 0; x < SCREENWIDTH; x++)
++                    *o++ = in[x] * 0x101;
+             } else {
+-                //XXX FIXME fb_scaling support!
++                byte *o = lb;
++                for (x = 0; x < SCREENWIDTH; x++)
++                    for (i = 0; i < fb_scaling; i++)
++                        *o++ = in[x];
+             }
+-#else
+-            //cmap_to_rgb565((void*)line_out, (void*)line_in, SCREENWIDTH);
+-            cmap_to_fb((void*)line_out, (void*)line_in, SCREENWIDTH);
+-#endif
+-            line_out += (SCREENWIDTH * fb_scaling * (fb.bits_per_pixel/8)) + x_offset_end;
++            break;
++        case 2: {
++            uint16_t *o = (uint16_t *)lb;
++            for (x = 0; x < SCREENWIDTH; x++)
++                for (i = 0; i < fb_scaling; i++)
++                    *o++ = fb_lut[in[x]];
++            break;
++        }
++        default: {
++            uint32_t *o = (uint32_t *)lb;
++            for (x = 0; x < SCREENWIDTH; x++)
++                for (i = 0; i < fb_scaling; i++)
++                    *o++ = fb_lut[in[x]];
++            break;
++        }
++        }
++        for (i = 0; i < fb_scaling; i++, out += fb_fix.line_length) {
++            if ((w & 15) == 0)
++                copy_move16(out, lb, w);
++            else
++                memcpy(out, lb, w);
+         }
+-        line_in += SCREENWIDTH;
+     }
+-
+-    /* Start drawing from y-offset */
+-    lseek(fd_fb, y_offset * fb.xres, SEEK_SET);
+-    write(fd_fb, I_VideoBuffer_FB, (SCREENHEIGHT * fb_scaling * (fb.bits_per_pixel/8)) * fb.xres); /* draw only portion used by doom + x-offsets */
+ }
+ 
+ //
+@@ -464,70 +592,44 @@ void I_ReadScreen (byte* scr)
+ 
+ void I_SetPalette (byte* palette)
+ {
+-	int i;
+-	//col_t* c;
+-
+-	//for (i = 0; i < 256; i++)
+-	//{
+-	//	c = (col_t*)palette;
+-
+-	//	rgb565_palette[i] = GFX_RGB565(gammatable[usegamma][c->r],
+-	//								   gammatable[usegamma][c->g],
+-	//								   gammatable[usegamma][c->b]);
+-
+-	//	palette += 3;
+-	//}
+-    
+-
+-    /* performance boost:
+-     * map to the right pixel format over here! */
++    static uint16_t r[256], g[256], b[256];
++    struct fb_cmap cmap = { 0, 256, r, g, b, NULL };
++    int i;
+ 
+-    for (i=0; i<256; ++i ) {
++    for (i = 0; i < 256; ++i) {
+         colors[i].a = 0;
+         colors[i].r = gammatable[usegamma][*palette++];
+         colors[i].g = gammatable[usegamma][*palette++];
+         colors[i].b = gammatable[usegamma][*palette++];
++        r[i] = colors[i].r * 0x101;
++        g[i] = colors[i].g * 0x101;
++        b[i] = colors[i].b * 0x101;
++        fb_lut[i] = ((colors[i].r >> (8 - fb.red.length)) << fb.red.offset)
++                  | ((colors[i].g >> (8 - fb.green.length)) << fb.green.offset)
++                  | ((colors[i].b >> (8 - fb.blue.length)) << fb.blue.offset);
+     }
+ 
+-    /* Set new color map in kernel framebuffer driver */
+-    //XXX FIXME ioctl(fd_fb, IOCTL_FB_PUTCMAP, colors);
++    if (fb.bits_per_pixel == 8)
++        ioctl(fd_fb, FBIOPUTCMAP, &cmap);
+ }
+ 
+ // Given an RGB value, find the closest matching palette index.
+ 
+ int I_GetPaletteIndex (int r, int g, int b)
+ {
+-    int best, best_diff, diff;
+-    int i;
+-    col_t color;
++    int best = 0, best_diff = INT_MAX, diff, i;
+ 
+-    printf("I_GetPaletteIndex\n");
+-
+-    best = 0;
+-    best_diff = INT_MAX;
+-
+-    for (i = 0; i < 256; ++i)
+-    {
+-    	color.r = GFX_RGB565_R(rgb565_palette[i]);
+-    	color.g = GFX_RGB565_G(rgb565_palette[i]);
+-    	color.b = GFX_RGB565_B(rgb565_palette[i]);
+-
+-        diff = (r - color.r) * (r - color.r)
+-             + (g - color.g) * (g - color.g)
+-             + (b - color.b) * (b - color.b);
+-
+-        if (diff < best_diff)
+-        {
++    for (i = 0; i < 256; ++i) {
++        diff = (r - colors[i].r) * (r - colors[i].r)
++             + (g - colors[i].g) * (g - colors[i].g)
++             + (b - colors[i].b) * (b - colors[i].b);
++        if (diff < best_diff) {
+             best = i;
+             best_diff = diff;
+         }
+-
+         if (diff == 0)
+-        {
+             break;
+-        }
+     }
+-
+     return best;
+ }
+ 
