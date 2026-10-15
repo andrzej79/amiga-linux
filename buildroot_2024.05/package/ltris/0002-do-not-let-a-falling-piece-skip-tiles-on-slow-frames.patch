@@ -1,0 +1,69 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] do not let a falling piece skip tiles on slow frames
+
+bowl_update() moves the piece by velocity * frame time and checks for a
+collision only at the tile it ends up in (see the FIXME there).  Soft
+drop is 0.6 px/ms with 20 px tiles, one tile per 33 ms, and on a 68060
+a frame often takes longer, so the piece skips tiles.  When it jumps
+two or more tiles past the floor or into the stack, it is moved back
+only one tile and locked there, partly inside: a 2x2 piece dropped
+fast onto an empty bowl ends up as 2x1.
+
+Step down one tile at a time to the new position and stop at the first
+blocked one.  That makes multi-tile moves per frame legitimate, so drop
+the "Oops, non-consecutive y-values" warning (and old_y, which only fed
+it), which would otherwise be printed on every slow frame.
+
+--- a/src/bowl.c
++++ b/src/bowl.c
+@@ -1299,7 +1299,6 @@
+ 
+ void bowl_update( Bowl *bowl, int ms, BowlControls *bc, int game_over )
+ {
+-    int old_y = bowl_convert_cury2y(bowl);
+     int hori_movement = 0;
+     int new_rot, hori_mod, vert_mod, ret;
+     float vy;
+@@ -1406,7 +1405,6 @@
+ 			    bowl_toggle_gravity(bowl);
+ 		    else {
+ 			    bowl_drop_block(bowl);
+-			    old_y = bowl->block.y-1; /* prevent warning below */
+ 			    bowl_check_lockdelay(bowl);
+ 			    if (bowl->ldelay_cur > 0)
+ 				    bowl->ldelay_cur = 1;
+@@ -1479,8 +1477,24 @@
+         		if (config.modern || (bc->lshift!=CS_PRESSED && bc->rshift!=CS_PRESSED))
+         			vy = bowl->block_drop_vel;
+         if (!bowl->zero_gravity && bowl->ldelay_cur == 0) {
++        	int new_y;
+         	bowl->block.cur_y += vy * ms;
+-        	bowl->block.y = bowl_convert_cury2y(bowl);
++        	new_y = bowl_convert_cury2y(bowl);
++        	/* a slow frame can cover several tiles: go down one tile
++        	 * at a time and stop at the first one that is blocked, so
++        	 * the piece cannot tunnel into the stack or the floor.
++        	 * Without lock delay the code below expects y to be the
++        	 * blocked tile (it inserts one above), with lock delay the
++        	 * last free one. */
++        	while (bowl->block.y < new_y) {
++        		if (!bowl_piece_can_drop(bowl)) {
++        			if (bowl->ldelay_max == 0)
++        				bowl->block.y++;
++        			bowl->block.cur_y = bowl->block.y * bowl->block_size;
++        			break;
++        		}
++        		bowl->block.y++;
++        	}
+         }
+ 
+         /* skip lock delay with soft drop */
+@@ -1497,8 +1511,6 @@
+         	}
+         } else {
+         	/* insert block or start lock delay on y-position change */
+-        	if (bowl->block.y - old_y > 1)
+-        		fprintf(stderr, "Oops, non-consecutive y-values...\n");
+         	if (bowl->ldelay_max == 0) {
+         	        /* without lock delay, check if new tile was entered and
+         	         * insert block one above on collision

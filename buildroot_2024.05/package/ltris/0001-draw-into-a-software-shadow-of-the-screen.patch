@@ -1,0 +1,26 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] draw into a software shadow of the screen
+
+set_video_mode() asks for an SDL_HWSURFACE screen.  Under SDL 1.2's
+fbcon driver that surface is the mapped frame buffer itself, so every
+step of a redraw (background, shaded panels, pieces, text) is visible
+the moment it is written, and SDL_UpdateRects does nothing: the bowl,
+the side panels and the menu flicker with half-drawn frames.  The
+alpha-blended panels also read the frame buffer back, which is slow on
+video memory and keeps each half-drawn state on screen longer.
+
+Ask for SDL_SWSURFACE instead.  SDL then keeps the screen in RAM and
+the game's own SDL_UpdateRects calls copy only finished areas to the
+frame buffer (lbreakout2 does the same).
+
+--- a/src/sdl.c
++++ b/src/sdl.c
+@@ -908,7 +908,7 @@
+     SDL_PixelFormat	*fmt;
+ #endif
+     int w, h;
+-    int vflags = (fullscreen?SDL_FULLSCREEN:0) | SDL_HWSURFACE;
++    int vflags = (fullscreen?SDL_FULLSCREEN:0) | SDL_SWSURFACE;
+ 
+     /* free old screen */
+     if (sdl.screen) {
