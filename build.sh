@@ -96,9 +96,12 @@ br_make() { make -C "$BR_SRC" O="$BR_OUT" BR2_EXTERNAL="$REPO/br2-external" "$@"
 br_prepare() {
     log "Buildroot $BR_VERSION, config $BR_CONFIG"
     fetch "https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.xz" "$BR_SRC"
-    # Extra/updated package patches kept next to the configs
-    local pkgdir=$REPO/$(dirname "$BR_CONFIG")/package
-    [ -d "$pkgdir" ] && rsync -a --exclude .DS_Store "$pkgdir/" "$BR_SRC/package/"
+    # Extra/updated package patches and arch options kept next to the configs
+    local sub dir
+    for sub in package arch; do
+        dir=$REPO/$(dirname "$BR_CONFIG")/$sub
+        [ -d "$dir" ] && rsync -a --exclude .DS_Store "$dir/" "$BR_SRC/$sub/"
+    done
     mkdir -p "$BR_OUT"
     cp "$REPO/$BR_CONFIG" "$BR_OUT/.config"
     br_make olddefconfig >/dev/null

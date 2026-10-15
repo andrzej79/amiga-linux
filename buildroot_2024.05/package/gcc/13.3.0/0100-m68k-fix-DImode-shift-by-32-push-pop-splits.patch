@@ -1,0 +1,44 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] m68k: fix DImode shift-by-32 push/pop splits with an sp-relative source
+
+The pre_dec split of (ashift:DI x 32) pushes 0, then the low word of x;
+the post_inc split of (lshiftrt:DI x 32) stores 0, then the high word.
+When x is addressed through the auto-modified register (typically a
+DImode spill slot pushed as a call argument: move.l 72(%sp),-(%sp) after
+clr.l -(%sp)), the second move reads 4 bytes off, the other word of x.
+
+Seen with -mcpu=68060 tuning in OpenSSL 3.3 (crypto/threads_pthread.c,
+ossl_synchronize_rcu: __atomic_fetch_or_8 (..., (uint64_t) id << 32)
+received 0 << 32, so the RCU writer waited forever for its id).
+
+Upstream-Status: Pending
+
+---
+--- a/gcc/config/m68k/m68k.md	2026-10-15 01:43:17
++++ b/gcc/config/m68k/m68k.md	2026-10-15 01:43:17
+@@ -4519,6 +4519,13 @@
+ {
+   operands[0] = adjust_address(operands[0], SImode, 0);
+   operands[1] = gen_lowpart(SImode, operands[1]);
++  /* The first push has decremented the register by the time the second
++     one reads the source: compensate when the source is addressed through
++     it, e.g. a DImode spill slot pushed as a call argument.  */
++  if (MEM_P (operands[1])
++      && reg_mentioned_p (XEXP (XEXP (operands[0], 0), 0),
++			  XEXP (operands[1], 0)))
++    operands[1] = adjust_address (operands[1], SImode, 4);
+ })
+ 
+ (define_split
+@@ -5061,6 +5068,11 @@
+ {
+   operands[0] = adjust_address(operands[0], SImode, 0);
+   operands[1] = gen_highpart(SImode, operands[1]);
++  /* As above: the first store has incremented the register.  */
++  if (MEM_P (operands[1])
++      && reg_mentioned_p (XEXP (XEXP (operands[0], 0), 0),
++			  XEXP (operands[1], 0)))
++    operands[1] = adjust_address (operands[1], SImode, -4);
+ })
+ 
+ (define_split
