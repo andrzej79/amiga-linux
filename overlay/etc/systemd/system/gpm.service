@@ -1,0 +1,12 @@
+[Unit]
+Description=Console mouse (gpm)
+Documentation=man:gpm(8)
+ConditionPathExists=/dev/input/mice
+
+[Service]
+Type=forking
+PIDFile=/run/gpm.pid
+ExecStart=/usr/sbin/gpm -m /dev/input/mice -t imps2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,84 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] panel: repaint only the changed lines on cursor up/down
+
+select_item() marks the panel dirty, so every cursor up/down repaints
+the whole panel: frame, header, every file line and the mini-info line.
+Each line goes through mc's UTF-8 term-form conversion, the file-type
+highlighting, strftime() for the date and ncursesw's per-character
+processing; on a 68060 that is about 2 ms per line, 80 ms for a 40-line
+panel, so mc falls behind the keyboard autorepeat and keeps scrolling
+after the key is released.
+
+When the view did not scroll, move_down()/move_up() have already
+repainted the old line: repaint only the new current line and the
+mini-info line.  Scrolling and every other caller of select_item()
+still repaint the whole panel.
+
+--- a/src/filemanager/panel.c
++++ b/src/filemanager/panel.c
+@@ -2173,11 +2173,37 @@
+ }
+ 
+ /* --------------------------------------------------------------------------------------------- */
++/**
++ * Finish a one-line cursor move.  select_item() marks the whole panel dirty,
++ * and repainting every line is slow on slow machines (about 2 ms per line on
++ * a 68060).  If the view did not scroll, the caller has already repainted
++ * the old line: repaint only the new current line and the mini-info line.
++ */
+ 
+ static void
++select_item_moved (WPanel * panel, int old_top, gboolean was_dirty)
++{
++    select_item (panel);
++
++    if (!was_dirty && panel->top == old_top && panel->active)
++    {
++        repaint_file (panel, panel->current,
++                      panel_current_entry (panel)->f.marked != 0 ? FATTR_MARKED_CURRENT :
++                      FATTR_CURRENT);
++        display_mini_info (panel);
++        tty_set_normal_attrs ();
++        panel->dirty = FALSE;
++    }
++}
++
++/* --------------------------------------------------------------------------------------------- */
++
++static void
+ move_down (WPanel * panel)
+ {
+     int items;
++    int old_top = panel->top;
++    gboolean was_dirty = panel->dirty;
+ 
+     if (panel->current + 1 == panel->dir.len)
+         return;
+@@ -2202,7 +2228,7 @@
+         if (panel->top > panel->dir.len - items)
+             panel->top = panel->dir.len - items;
+     }
+-    select_item (panel);
++    select_item_moved (panel, old_top, was_dirty);
+ }
+ 
+ /* --------------------------------------------------------------------------------------------- */
+@@ -2210,6 +2236,9 @@
+ static void
+ move_up (WPanel * panel)
+ {
++    int old_top = panel->top;
++    gboolean was_dirty = panel->dirty;
++
+     if (panel->current == 0)
+         return;
+ 
+@@ -2231,7 +2260,7 @@
+         if (panel->top < 0)
+             panel->top = 0;
+     }
+-    select_item (panel);
++    select_item_moved (panel, old_top, was_dirty);
+ }
+ 
+ /* --------------------------------------------------------------------------------------------- */
