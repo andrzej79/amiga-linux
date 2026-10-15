@@ -56,6 +56,20 @@
 #define WARP_ARTIX_TEMP			WARP_MCLK(0x34)	/* FPGA XADC temperature, 12 bit */
 #define WARP_DIV_Y_CR			WARP_MCLK(0x30)
 #define WARP_ARTIX_TEMP			WARP_MCLK(0x34)
+/* template/pattern blitter: 1-bit rows from the pattern buffer, FG/BG into VRAM */
+#define WARP_PATBLT_CR			WARP_MCLK(0x38)
+#define WARP_PAT_SHIFT			WARP_MCLK(0x3C)	/* 27-16 shift-y, 3-0 shift-x */
+#define WARP_PAT_BPR			WARP_MCLK(0x40)	/* template bytes per row, even, 8 bit */
+#define WARP_PAT_WIDTH			WARP_MCLK(0x44)	/* 12 bit */
+#define WARP_PAT_HEIGHT			WARP_MCLK(0x48)	/* 12 bit */
+#define WARP_PAT_BG			WARP_MCLK(0x4C)	/* 24 bit pen */
+#define WARP_PAT_FG			WARP_MCLK(0x50)	/* 24 bit pen */
+#define WARP_PAT_DST_BASE		WARP_MCLK(0x54)	/* board address A27-A4 */
+#define WARP_PAT_DST_BPR		WARP_MCLK(0x58)	/* 13 bit */
+#define WARP_PAT_DST_BPP		WARP_MCLK(0x5C)	/* bytes per pixel */
+#define WARP_PAT_DST_X			WARP_MCLK(0x60)	/* 12 bit */
+#define WARP_PAT_DST_Y			WARP_MCLK(0x64)	/* 12 bit */
+#define WARP_PAT_PATTERN_H		WARP_MCLK(0x68)	/* pattern mode: rows before repeating */
 #define WARP_GENLOCK_SR			WARP_MCLK(0x98)	/* read only */
 
 #define WARP_DISP_MCR_VAL(scr_wpr, lines, disp_wpr) \
@@ -64,7 +78,14 @@
 #define WARP_BLT_CR_COPY		BIT(0)
 #define WARP_BLT_CR_FILL		BIT(1)
 #define WARP_BLT_CR_FMT(f)		((u32)(f) << 2)	/* 0 = 8 bit, 1 = 16 bit, 2 = 32 bit */
-#define WARP_BLT_SR_BUSY_MASK		0x19
+#define WARP_BLT_SR_BUSY_MASK		0x19	/* 0 copy/fill, 3 template/pattern, 4 line */
+
+#define WARP_PATBLT_CR_START		BIT(0)
+#define WARP_PATBLT_CR_NO_BG		BIT(1)	/* JAM1: 0 bits leave VRAM alone */
+#define WARP_PATBLT_CR_PATTERN		BIT(2)
+#define WARP_PATBUFF_BYTES		2048
+/* VRAM in the board's own memory map, as the template blitter addresses it */
+#define WARP_VRAM_BOARD_BASE		0x0E000000
 
 /* ---- PIXC block (WarpRegs_pix), pixel clock domain ---------------------- */
 /*
@@ -97,7 +118,14 @@
 #define WARP_DISP_CR_RTG		BIT(7)	/* 1 = RTG framebuffer, 0 = Amiga video (scandoubler) */
 
 #define WARP_SPR_CTRL_EN		BIT(0)
+#define WARP_SPR_CTRL_HIRES		BIT(1)	/* one sprite pixel per screen pixel */
 #define WARP_SPR_CTRL_SCALE_MASK	(0x0f << 2)
+/*
+ * Sprite image in the sprite buffer: 48 rows of two longs, 2 bits per pixel,
+ * pixel i of a 16-pixel long in bits 2i+1..2i; 0 transparent, 1-3 COL0-COL2.
+ */
+#define WARP_SPR_W			32
+#define WARP_SPR_H			48
 
 #define WARP_TIMING(start, end)		((((u32)(start) & 0xfff) << 12) | ((u32)(end) & 0xfff))
 

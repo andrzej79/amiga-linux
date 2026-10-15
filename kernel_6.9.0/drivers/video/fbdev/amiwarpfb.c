@@ -9,6 +9,9 @@
  * limits is accepted: the pixel clock is synthesised by reprogramming the
  * video MMCM through DRP (amiwarp_vidclk.c), 25 .. 148.5 MHz.
  *
+ * Console acceleration: fill and copy on the blitter, text (mono images) on
+ * the template blitter, the cursor on the hardware sprite.
+ *
  * Pixel formats (big-endian in memory):
  *   8 bit  - CLUT, 256 x 0x00RRGGBB
  *   16 bit - RGB565
@@ -43,6 +46,7 @@
 #define WARP_MAX_XRES		1920
 #define WARP_MAX_TIMING		4095	/* 12-bit timing counters */
 #define WARP_MAX_WPR		1023	/* 10-bit words-per-row fields */
+#define WARP_MAX_BLT_Y		4095	/* 12-bit blitter y coordinates */
 #define WARP_FAST_CLK_HZ	110000000UL	/* above this only the 7060 meets timing */
 #define BLT_IDLE_POLLS		2000000UL
 
@@ -60,7 +64,11 @@ MODULE_PARM_DESC(vram_cached, "Map VRAM write-through cached (0: uncached)");
 
 static bool noaccel;
 module_param(noaccel, bool, 0444);
-MODULE_PARM_DESC(noaccel, "Disable the blitter (software fill/copy)");
+MODULE_PARM_DESC(noaccel, "Disable the blitter (software fill/copy/text)");
+
+static bool hwcursor = true;
+module_param(hwcursor, bool, 0444);
+MODULE_PARM_DESC(hwcursor, "Console cursor on the hardware sprite (0: drawn in software)");
 
 struct warpfb_par {
 	struct cswarp_core *wc;
@@ -72,8 +80,14 @@ struct warpfb_par {
 	bool clk_ok;			/* MMCM locked: PIXC accessible */
 	u32 cur_pixclk_hz;
 	bool blt_timeout_logged;
+	u32 tmpl[WARP_PATBUFF_BYTES / 4];	/* template being built for the pattern buffer */
+	/* console cursor on the sprite */
+	u32 spr_ctrl;
+	bool spr_valid;			/* spr_img/spr_col are in the hardware */
+	u32 spr_img[WARP_SPR_H * 2];
+	u32 spr_col[2];
 	/* statistics (sysfs) */
-	unsigned long n_fill, n_copy, n_pan, n_blt_wait_timeouts;
+	unsigned long n_fill, n_copy, n_text, n_pan, n_cursor, n_blt_wait_timeouts;
 };
 
 /*
@@ -422,8 +436,11 @@ static int warpfb_set_par(struct fb_info *info)
 	wr(par, WARP_TIMING(var->yres, vtotal), WARP_DISP_V_BLANK);
 	wr(par, WARP_TIMING(vfp, vsync_end), WARP_DISP_V_SYNC);
 	wr(par, WARP_TIMING(vtotal, htotal), WARP_DISP_VH_MAX);
-	/* sprite off, no scaling */
-	wr(par, rd(par, WARP_SPR_CTRL) & ~(WARP_SPR_CTRL_EN | WARP_SPR_CTRL_SCALE_MASK), WARP_SPR_CTRL);
+	/* sprite off, no scaling, 1:1 pixels; fbcon loads its cursor again */
+	par->spr_ctrl = (rd(par, WARP_SPR_CTRL) & ~(WARP_SPR_CTRL_EN | WARP_SPR_CTRL_SCALE_MASK)) |
+			WARP_SPR_CTRL_HIRES;
+	par->spr_valid = false;
+	wr(par, par->spr_ctrl, WARP_SPR_CTRL);
 
 	/* 4. colour mode, polarity, RTG source; pulse the timing generator reset */
 	disp_cr = WARP_DISP_CR_RTG | WARP_DISP_CR_COLOR(color_fmt(bpp));
@@ -464,6 +481,7 @@ static void warpfb_restore_native(struct warpfb_par *par)
 		wr(par, WARP_TIMING(1024, 1066), WARP_DISP_V_BLANK);
 		wr(par, WARP_TIMING(1025, 1028), WARP_DISP_V_SYNC);
 		wr(par, WARP_TIMING(1066, 1688), WARP_DISP_VH_MAX);
+		wr(par, rd(par, WARP_SPR_CTRL) & ~WARP_SPR_CTRL_EN, WARP_SPR_CTRL);
 		wr(par, WARP_DISP_CR_COLOR(2) | WARP_DISP_CR_TG_RESET, WARP_DISP_CR);
 		wr(par, WARP_DISP_CR_COLOR(2), WARP_DISP_CR);
 	} else {
@@ -615,11 +633,193 @@ static void warpfb_copyarea(struct fb_info *info, const struct fb_copyarea *area
 	wr(par, WARP_BLT_CR_COPY | WARP_BLT_CR_FMT(color_fmt(bpp)), WARP_BLT_CR);
 }
 
+/*
+ * Mono images - fbcon text, a run of glyphs per call - go through the template
+ * blitter: the 1-bit rows are loaded into the FPGA's 2 KB pattern buffer and
+ * expanded to FG/BG pixels in VRAM, so the CPU sends a few hundred bytes over
+ * the bus instead of writing every pixel.  Runs too wide for the buffer are
+ * cut into slices.  Other images (the logo) are drawn by the CPU.
+ */
 static void warpfb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	/* the CPU must not race the blitter on the same memory */
-	warpfb_sync(info);
-	cfb_imageblit(info, image);
+	struct warpfb_par *par = info->par;
+	u32 bpp = info->var.bits_per_pixel, Bpp = bytes_per_pixel(bpp);
+	u32 bpr = info->fix.line_length;
+	u32 pitch = DIV_ROUND_UP(image->width, 8);
+	u32 h = image->height, slice, x0, fg, bg, base;
+
+	if (noaccel || !par->clk_ok || image->depth != 1 || !image->width || !h ||
+	    h > WARP_PATBUFF_BYTES / 2) {
+		/* the CPU must not race the blitter on the same memory */
+		warpfb_sync(info);
+		cfb_imageblit(info, image);
+		return;
+	}
+
+	fg = warpfb_pen(info, image->fg_color);
+	bg = warpfb_pen(info, image->bg_color);
+	if (bpp == 32) {
+		/* B,G,R,X in memory: the blitter takes the pen as 0xBBGGRR */
+		fg >>= 8;
+		bg >>= 8;
+	}
+	/* rows of 16-bit words; the slice must fit the buffer and PAT_BPR's 8 bits */
+	slice = min(127U, WARP_PATBUFF_BYTES / 2 / h) * 16;
+	/* the image's first row as the base: PAT_DST_Y has only 12 bits */
+	base = (((par->vram_phys + image->dy * bpr) & 0x0fffffff) + WARP_VRAM_BOARD_BASE) >> 4;
+	par->n_text++;
+
+	for (x0 = 0; x0 < image->width; x0 += slice) {
+		u32 w = min(slice, image->width - x0);
+		u32 tbpr = DIV_ROUND_UP(w, 16) * 2;
+		u32 n = min(tbpr, pitch - x0 / 8);
+		u32 longs = DIV_ROUND_UP(tbpr * h, 4);
+		const u8 *src = image->data + x0 / 8;
+		u8 *t = (u8 *)par->tmpl;
+		u32 r, i;
+
+		for (r = 0; r < h; r++, src += pitch, t += tbpr) {
+			memcpy(t, src, n);
+			memset(t + n, 0, tbpr - n);
+		}
+		memset(t, 0, longs * 4 - tbpr * h);
+
+		/* one pattern buffer: the previous template must be done with */
+		if (warpfb_wait_blitter(par)) {
+			cfb_imageblit(info, image);
+			return;
+		}
+		wr(par, 0, WARP_REGS_PATBUFF_OFFSET + 4);
+		for (i = 0; i < longs; i++)
+			wr(par, par->tmpl[i], WARP_REGS_PATBUFF_OFFSET);
+		wr(par, 0, WARP_PAT_SHIFT);
+		wr(par, tbpr, WARP_PAT_BPR);
+		wr(par, w, WARP_PAT_WIDTH);
+		wr(par, h, WARP_PAT_HEIGHT);
+		wr(par, 0, WARP_PAT_PATTERN_H);
+		wr(par, base, WARP_PAT_DST_BASE);
+		wr(par, bpr, WARP_PAT_DST_BPR);
+		wr(par, Bpp, WARP_PAT_DST_BPP);
+		wr(par, bg, WARP_PAT_BG);
+		wr(par, fg, WARP_PAT_FG);
+		wr(par, image->dx + x0, WARP_PAT_DST_X);
+		wr(par, 0, WARP_PAT_DST_Y);
+		wr(par, WARP_PATBLT_CR_START, WARP_PATBLT_CR);
+	}
+}
+
+/* ------------------------------------------------------------------------ */
+/* Console cursor on the hardware sprite                                    */
+/* ------------------------------------------------------------------------ */
+
+static void warpfb_sprite_enable(struct warpfb_par *par, bool on)
+{
+	u32 ctrl = on ? par->spr_ctrl | WARP_SPR_CTRL_EN : par->spr_ctrl & ~WARP_SPR_CTRL_EN;
+
+	if (ctrl != par->spr_ctrl || !par->spr_valid) {
+		par->spr_ctrl = ctrl;
+		wr(par, ctrl, WARP_SPR_CTRL);
+	}
+}
+
+static u32 warpfb_cmap_rgb(struct fb_info *info, u32 idx)
+{
+	const struct fb_cmap *c = &info->cmap;
+
+	if (idx >= c->len)
+		return 0xffffff;
+	return (c->red[idx] >> 8) << 16 | (c->green[idx] >> 8) << 8 | (c->blue[idx] >> 8);
+}
+
+/*
+ * fbcon's cursor on the FPGA sprite.  soft_cursor() redraws the character
+ * cell with the glyph XORed by the cursor shape; the sprite shows the same,
+ * but only over the shape - the inverted glyph in FG/BG - and is transparent
+ * elsewhere, so the character below is left as it is.  Blinking only toggles
+ * the enable bit, and the image is reloaded only when it changes.
+ */
+static int warpfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
+{
+	struct warpfb_par *par = info->par;
+	const struct fb_image *img = &cursor->image;
+	u32 pitch = DIV_ROUND_UP(img->width, 8);
+	u32 spr[WARP_SPR_H * 2], col[2];
+	u32 x, y, i;
+
+	if (!hwcursor || !par->clk_ok)
+		return -EINVAL;
+	if (img->width > WARP_SPR_W || img->height > WARP_SPR_H || img->depth != 1 ||
+	    cursor->rop != ROP_XOR) {
+		/* drawn in software from now on: the sprite must not stay up */
+		warpfb_sprite_enable(par, false);
+		return -EINVAL;
+	}
+	if (!cursor->enable) {
+		warpfb_sprite_enable(par, false);
+		return 0;
+	}
+
+	memset(spr, 0, sizeof(spr));
+	for (y = 0; y < img->height; y++) {
+		const u8 *g = (const u8 *)img->data + y * pitch;
+		const u8 *m = (const u8 *)cursor->mask + y * pitch;
+
+		for (x = 0; x < img->width; x++) {
+			u8 bit = 0x80 >> (x & 7);
+
+			if (m[x >> 3] & bit)	/* glyph ^ mask: FG (COL0) where the glyph is clear */
+				spr[y * 2 + (x >> 4)] |= (g[x >> 3] & bit ? 2u : 1u) << ((x & 15) * 2);
+		}
+	}
+	col[0] = warpfb_cmap_rgb(info, img->fg_color);
+	col[1] = warpfb_cmap_rgb(info, img->bg_color);
+
+	par->n_cursor++;
+	if (!par->spr_valid || memcmp(spr, par->spr_img, sizeof(spr))) {
+		/* hide while the buffer is rewritten, so no half-new frame shows */
+		warpfb_sprite_enable(par, false);
+		wr(par, 0, WARP_REGS_SPRBUFF_OFFSET + 4);
+		for (i = 0; i < WARP_SPR_H * 2; i++)
+			wr(par, spr[i], WARP_REGS_SPRBUFF_OFFSET);
+		memcpy(par->spr_img, spr, sizeof(spr));
+	}
+	if (!par->spr_valid || col[0] != par->spr_col[0] || col[1] != par->spr_col[1]) {
+		wr(par, col[0], WARP_SPR_COL0);
+		wr(par, col[1], WARP_SPR_COL1);
+		par->spr_col[0] = col[0];
+		par->spr_col[1] = col[1];
+	}
+	/* 12-bit signed screen coordinates */
+	wr(par, (img->dx - info->var.xoffset) & 0xfff, WARP_SPR_POS_X);
+	wr(par, (img->dy - info->var.yoffset) & 0xfff, WARP_SPR_POS_Y);
+	par->spr_valid = true;
+	warpfb_sprite_enable(par, true);
+	return 0;
+}
+
+/*
+ * A user space opener (the X driver) may program the sprite through the
+ * mmapped registers: reload the console cursor from scratch afterwards.
+ */
+static int warpfb_open(struct fb_info *info, int user)
+{
+	struct warpfb_par *par = info->par;
+
+	if (user)
+		par->spr_valid = false;
+	return 0;
+}
+
+static int warpfb_release(struct fb_info *info, int user)
+{
+	struct warpfb_par *par = info->par;
+
+	if (user && par->clk_ok) {
+		par->spr_ctrl = (rd(par, WARP_SPR_CTRL) &
+				 ~(WARP_SPR_CTRL_EN | WARP_SPR_CTRL_SCALE_MASK)) | WARP_SPR_CTRL_HIRES;
+		par->spr_valid = false;
+	}
+	return 0;
 }
 
 static ssize_t warpfb_read(struct fb_info *info, char __user *buf, size_t count, loff_t *ppos)
@@ -637,6 +837,8 @@ static ssize_t warpfb_write(struct fb_info *info, const char __user *buf, size_t
 
 static const struct fb_ops warpfb_ops = {
 	.owner		= THIS_MODULE,
+	.fb_open	= warpfb_open,
+	.fb_release	= warpfb_release,
 	.fb_read	= warpfb_read,
 	.fb_write	= warpfb_write,
 	.fb_mmap	= fb_io_mmap,
@@ -648,6 +850,7 @@ static const struct fb_ops warpfb_ops = {
 	.fb_fillrect	= warpfb_fillrect,
 	.fb_copyarea	= warpfb_copyarea,
 	.fb_imageblit	= warpfb_imageblit,
+	.fb_cursor	= warpfb_cursor,
 	.fb_sync	= warpfb_sync,
 };
 
@@ -660,9 +863,9 @@ static ssize_t accel_stats_show(struct device *dev, struct device_attribute *att
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct warpfb_par *par = info->par;
 
-	return sysfs_emit(buf, "fill %lu\ncopy %lu\npan %lu\nblt_wait_timeouts %lu\npixclk_hz %u\n",
-			  par->n_fill, par->n_copy, par->n_pan, par->n_blt_wait_timeouts,
-			  par->cur_pixclk_hz);
+	return sysfs_emit(buf, "fill %lu\ncopy %lu\ntext %lu\npan %lu\ncursor %lu\nblt_wait_timeouts %lu\npixclk_hz %u\n",
+			  par->n_fill, par->n_copy, par->n_text, par->n_pan, par->n_cursor,
+			  par->n_blt_wait_timeouts, par->cur_pixclk_hz);
 }
 static DEVICE_ATTR_RO(accel_stats);
 
@@ -747,6 +950,11 @@ static int warpfb_probe(struct platform_device *pdev)
 	info->pseudo_palette = par->pseudo_palette;
 	info->flags = FBINFO_HWACCEL_YPAN | FBINFO_HWACCEL_XPAN;
 	if (!noaccel)
+		/*
+		 * Not FBINFO_HWACCEL_IMAGEBLIT, although imageblit is the template
+		 * blitter: fbcon would then scroll by redrawing every line of text
+		 * (SCROLL_REDRAW) instead of one blitter copy, twice as slow.
+		 */
 		info->flags |= FBINFO_HWACCEL_COPYAREA | FBINFO_HWACCEL_FILLRECT;
 	cswarp_dbg(CSWARP_DBG_FB, &pdev->dev, "VRAM mapped %s at %p, accel %s\n",
 		   vram_cached ? "write-through" : "uncached", info->screen_base,
@@ -765,6 +973,18 @@ static int warpfb_probe(struct platform_device *pdev)
 		goto err_unmap;
 	}
 	fb_videomode_to_modelist(warpfb_modedb, ARRAY_SIZE(warpfb_modedb), &info->modelist);
+
+	/*
+	 * A virtual screen taller than the visible one lets fbcon scroll by
+	 * panning (SCROLL_PAN_MOVE: one register write per line, one blitter
+	 * copy when the bottom is reached) instead of copying runs of changed
+	 * characters on every line.  At most 4095 lines: the blitter's y
+	 * coordinates have 12 bits.
+	 */
+	info->var.yres_virtual = max(info->var.yres,
+				     min_t(u32, WARP_MAX_BLT_Y,
+					   WARP_VRAM_SIZE / warpfb_line_length(info->var.xres_virtual,
+									       info->var.bits_per_pixel)));
 
 	err = warpfb_check_var(&info->var, info);
 	if (err) {

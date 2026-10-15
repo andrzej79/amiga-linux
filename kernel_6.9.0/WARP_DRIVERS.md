@@ -25,7 +25,8 @@ The framebuffer also requires SysCfg ID ≥ `0x01234569` and `PIXCLK_SR` bit 2 (
 | `cswarp_core.spin_us=<n>` | busy-wait before sleeping on the ARM (default 100) |
 | `pata_cswarp.pio32=1` | 32-bit PIO (Warp560/1240/1260 only) |
 | `video=amiwarpfb:1024x768@60,depth:16` | initial mode and depth |
-| `amiwarpfb.noaccel=1` | software fill and copy instead of the blitter |
+| `amiwarpfb.noaccel=1` | software fill, copy and console text instead of the blitters |
+| `amiwarpfb.hwcursor=0` | console cursor drawn in software instead of on the hardware sprite |
 | `amiwarpfb.vram_cached=0` | map VRAM uncached instead of write-through |
 | `cswarp_disk.poll_ms=<n>` | media change polling interval (default 1000; 0 = scan only at probe) |
 | `cswarp_disk.io_timeout_ms=<n>` | fail a disk request when its unit announces nothing for this long (default 30000) |
@@ -60,7 +61,7 @@ The mask can be changed at runtime: `echo 0x1ff > /sys/module/cswarp_core/parame
 
 The disk driver adds `disk_stats` (per unit: reads, writes, bytes, errors, timeouts, cancels, busy retries, media changes, DMA state and chunk counts, zero-copy chunks/runs and why chunks were bounced, and where request time went in us: `total`, `submit`, `wait` for the board, `xfer` fetch exchanges, `tc`, `cache` maintenance, `copy` bounce copies) on the `cswarp-disk` platform device. Writing anything to it zeroes the counters.
 
-The framebuffer adds `accel_stats` (fill, copy and pan counts, blitter wait timeouts, current pixel clock) on the `cswarp-fb` platform device.
+The framebuffer adds `accel_stats` (fill, copy, template text, pan and cursor update counts, blitter wait timeouts, current pixel clock) on the `cswarp-fb` platform device.
 
 ## Board control (`cswarp-ctl`, used by `warptool`)
 
