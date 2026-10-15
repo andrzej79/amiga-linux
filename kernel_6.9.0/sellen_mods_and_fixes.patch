@@ -198,6 +198,27 @@ index 0d872d4..e7492d4 100644
  obj-$(CONFIG_NET_VENDOR_SYNOPSYS) += synopsys/
  obj-$(CONFIG_NET_VENDOR_PENSANDO) += pensando/
 +obj-$(CONFIG_AMIWARPNET) += amiwarpnet.o
+diff --git a/drivers/rtc/rtc-msm6242.c b/drivers/rtc/rtc-msm6242.c
+index 80e364b..4290edb 100644
+--- a/drivers/rtc/rtc-msm6242.c
++++ b/drivers/rtc/rtc-msm6242.c
+@@ -85,7 +85,15 @@ static inline unsigned int msm6242_read(struct msm6242_priv *priv,
+ static inline void msm6242_write(struct msm6242_priv *priv, unsigned int val,
+ 				unsigned int reg)
+ {
+-	__raw_writel(val, &priv->regs[reg]);
++	/*
++	 * The chip sits on D0-D3 of a 16-bit bus, so a longword write is two
++	 * word cycles and the second one (low word) lands last.  The CS-Lab
++	 * Warp's emulated clock decodes a 32-bit write at the register address
++	 * as one cycle and takes the digit from bits 19:16 (the byte at +1),
++	 * so put the value in both nibbles.  Harmless on the real chip, where
++	 * both word cycles now write the same value.
++	 */
++	__raw_writel(val | (val << 16), &priv->regs[reg]);
+ }
+ 
+ static void msm6242_lock(struct msm6242_priv *priv)
 diff --git a/drivers/scsi/a3000.c b/drivers/scsi/a3000.c
 index 378906f..1117cda 100644
 --- a/drivers/scsi/a3000.c
