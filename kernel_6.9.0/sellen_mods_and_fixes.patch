@@ -1,3 +1,51 @@
+diff --git a/arch/m68k/Kconfig.cpu b/arch/m68k/Kconfig.cpu
+index c777a12..c4bd2cc 100644
+--- a/arch/m68k/Kconfig.cpu
++++ b/arch/m68k/Kconfig.cpu
+@@ -92,6 +92,9 @@ config M68060
+ 	depends on MMU && !MMU_SUN3
+ 	select FPU
+ 	select CPU_HAS_ADDRESS_SPACES
++	# The 060 lacks the 64-bit mulu.l/divu.l forms: do_div() and udelay()
++	# would trap into the 060 integer emulation on every call (Warp).
++	select CPU_HAS_NO_MULDIV64
+ 	help
+ 	  If you anticipate running this kernel on a computer with a MC68060
+ 	  processor, say Y. Otherwise, say N.
+diff --git a/arch/m68k/include/asm/pgtable_mm.h b/arch/m68k/include/asm/pgtable_mm.h
+index dbdf1c2..cddf56d 100644
+--- a/arch/m68k/include/asm/pgtable_mm.h
++++ b/arch/m68k/include/asm/pgtable_mm.h
+@@ -106,9 +106,28 @@ extern unsigned long m68k_vmalloc_end;
+  * area for the same reason. ;)
+  */
+ #define VMALLOC_OFFSET	(8*1024*1024)
+-#define VMALLOC_START (((unsigned long) high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
++#define __VMALLOC_START (((unsigned long) high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
++#ifdef CONFIG_AMIGA
++/*
++ * The Amiga's head.S maps 0x40000000-0x5fffffff (Zorro III) with transparent
++ * translation, which bypasses the page tables for supervisor accesses, and
++ * chip RAM plus the custom chips at 0x80000000.  A vmalloc area from the end
++ * of RAM to KMAP_START would run through both: a vmalloc() or (040/060-only
++ * kernels, which ioremap() from here) a frame buffer mapping reaching past
++ * 0x40000000 silently hits whatever is at that physical address, e.g. the
++ * Warp's DDR3 RAM.  Use 0x60000000-0x7fffffff while RAM ends below it.
++ */
++#define AMIGA_VMALLOC_START	0x60000000UL
++#define AMIGA_VMALLOC_END	0x80000000UL
++#define VMALLOC_START (MACH_IS_AMIGA && __VMALLOC_START <= AMIGA_VMALLOC_START ? \
++		       AMIGA_VMALLOC_START : __VMALLOC_START)
++#define VMALLOC_END (MACH_IS_AMIGA && __VMALLOC_START <= AMIGA_VMALLOC_START ? \
++		     AMIGA_VMALLOC_END : KMAP_START)
++#else
++#define VMALLOC_START __VMALLOC_START
+ #define VMALLOC_END KMAP_START
+ #endif
++#endif
+ 
+ /* zero page used for uninitialized stuff */
+ extern void *empty_zero_page;
 diff --git a/drivers/ata/Kconfig b/drivers/ata/Kconfig
 index 928ec93..38990ec 100644
 --- a/drivers/ata/Kconfig

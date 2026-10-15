@@ -111,13 +111,19 @@ cross_compile() {
 }
 
 kernel_make() {
-    # Buildroot's GCC is configured --with-cpu=68040. For a multi-CPU kernel
-    # (020/030 enabled) the kernel passes no -m680x0 and relies on the
-    # compiler default, so restore the generic 68020 baseline; otherwise the
-    # 030 MMU instructions (pmove/ptest/pload) are rejected by the assembler.
+    # Buildroot's GCC is configured --with-cpu=68040/68060, and the kernel passes no
+    # -m680x0 when more than one of 040/060 (or any 020/030) is enabled.
+    #  - 020/030 enabled: restore the generic 68020 baseline, otherwise the 030
+    #    MMU instructions (pmove/ptest/pload) are rejected by the assembler.
+    #  - 040+060 only: compile for the 060.  Its code runs on the 040 too, and
+    #    it avoids the 64-bit mul/div forms the 060 lacks (each traps into the
+    #    060 integer emulation, ~3.5 us).  The assembler keeps the 040 default:
+    #    arch/m68k/fpsp040 uses instructions the 060 does not have.
     local cpu=()
     if grep -qE '^CONFIG_M680[23]0=y' "$K_OUT/.config" 2>/dev/null; then
         cpu=(KCFLAGS=-m68020 KAFLAGS=-m68020)
+    elif grep -q '^CONFIG_M68060=y' "$K_OUT/.config" 2>/dev/null; then
+        cpu=(KCFLAGS=-m68060)
     fi
     make -C "$K_SRC" O="$K_OUT" ARCH=m68k CROSS_COMPILE="$(cross_compile)" -j"$JOBS" \
         ${cpu[@]+"${cpu[@]}"} "$@"
