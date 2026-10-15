@@ -52,6 +52,29 @@ for f in "$ROOTFS_TAR" "$VMLINUX" "$AMIBOOT"; do
     [ -f "$f" ] || die "missing $f (run ./build.sh all first)"
 done
 
+# ---------------------------------------------------------------- up to date?
+# The inputs (files by size and time, this script, the settings) are hashed
+# into the .info: the same inputs again reuse the image instead of an
+# identical rebuild.  Delete the .info to force one.
+BASE=$OUT/warp-cf-${CF_BLOCKS}
+inputs_id() {
+    {
+        local f
+        for f in "$ROOTFS_TAR" "$VMLINUX" "$MODULES_TGZ" "$AMIBOOT" "$DH0_IMAGE"; do
+            if [ -f "$f" ]; then stat -c '%n %s %Y' "$f"; else echo "$f -"; fi
+        done
+        sha256sum < "$REPO/cfcard/mkimage.sh"
+        echo "$CF_BLOCKS $DH0_MB $LBOOT_MB $SWAP_MB $ROOT_DISK $VIDEO ${SWAP_AUTO:-0}"
+    } | sha256sum | cut -c1-32
+}
+INPUTS=$(inputs_id)
+if [ -f "$BASE.info" ] && [ -f "$BASE.data.gz" ] && [ -f "$BASE.extents" ] && [ -f "$BASE.ranges" ] &&
+   [ "$(sed -n 's/^INPUTS=//p' "$BASE.info")" = "$INPUTS" ]; then
+    log "Image ${BASE#$REPO/} is up to date (same rootfs, kernel, modules, DH0 and settings)"
+    exit 0
+fi
+rm -f "$BASE.info"   # rebuilt below; without it a half-built image is never used
+
 # ---------------------------------------------------------------- geometry
 CYLS=$((CF_BLOCKS / CYL_BLOCKS))
 cyls_for_mb() { echo $(( ($1 * 1024 * 1024 + CYL_BLOCKS * 512 - 1) / (CYL_BLOCKS * 512) )); }
@@ -107,7 +130,16 @@ cat > "$W/Linux" <<EOF
 ; Boot Linux from this card (Warp, firmware 3.000+)
 ;   Execute LBOOT:Linux            root on ${ROOT_DISK}4
 ;   Execute LBOOT:Linux DISK=sdb   when a drive is on the A1200 IDE port too
+; One-shot test kernel: LBOOT:vmlinux.try is renamed to vmlinux.trying and
+; booted once; the next boot (after a hang and reset) is LBOOT:vmlinux again.
 Stack 65536
+If EXISTS LBOOT:vmlinux.trying
+  Delete LBOOT:vmlinux.trying QUIET
+EndIf
+If EXISTS LBOOT:vmlinux.try
+  Rename LBOOT:vmlinux.try LBOOT:vmlinux.trying
+  LBOOT:amiboot-5.6 -k LBOOT:vmlinux.trying "root=/dev/{DISK}4 $OPTS"
+EndIf
 LBOOT:amiboot-5.6 -k LBOOT:vmlinux "root=/dev/{DISK}4 $OPTS"
 EOF
 cat > "$W/Linux-debug" <<EOF
@@ -124,6 +156,7 @@ cat > "$W/ReadMe" <<EOF
 Warp Linux boot partition
 -------------------------
   Execute LBOOT:Linux              normal boot, root /dev/${ROOT_DISK}4
+                                   (LBOOT:vmlinux.try, if there, is booted once)
   Execute LBOOT:Linux-debug        verbose Warp driver messages, no INT2 (polling)
   ... DISK=sdb                     if a drive sits on the A1200 IDE port too
                                    (that one is probed first and becomes sda)
@@ -233,21 +266,104 @@ put_part LBOOT "$W/lboot.hdf" $LBOOT_LO $LBOOT_HI
 put_part SWAP "$W/swap.img" $SWAP_LO $SWAP_HI
 put_part LINUX "$W/root.img" $ROOT_LO $ROOT_HI
 echo "disk.img: $(du -h "$W/disk.img" | cut -f1) allocated of $(( $(stat -c %s "$W/disk.img") >> 20 )) MiB"
+
+# What a card write must cover (make-cf.sh --used-only): the RDB, DH0 and LBOOT
+# whole, the swap header, and the blocks the ext4 root uses (its block bitmaps:
+# superblocks, descriptors, bitmaps, inode tables, journal, data - zeros
+# included).  Free ext4 blocks are never read, so whatever the card holds
+# there can stay.  "offset length" in bytes, MiB-aligned, merged.
+log "Write ranges for --used-only"
+dumpe2fs "$W/root.img" > "$W/dumpe2fs.txt" 2>/dev/null
+python3 - "$W/dumpe2fs.txt" "$W/ranges" "$(stat -c %s "$W/disk.img")" \
+    $(( DH0_LO * CYL_BLOCKS * 512 )) $(( SWAP_LO * CYL_BLOCKS * 512 )) $(( ROOT_LO * CYL_BLOCKS * 512 )) <<'PYEOF'
+import re, sys
+dump, out = sys.argv[1:3]
+disk_bytes, dh0_off, swap_off, root_off = map(int, sys.argv[3:])
+bsize = blocks = None
+free = []
+for line in open(dump):
+    if line.startswith("Block size:"):
+        bsize = int(line.split()[-1])
+    elif line.startswith("Block count:"):
+        blocks = int(line.split()[-1])
+    else:
+        m = re.match(r"\s+Free blocks: (.*)", line)
+        if m:
+            for r in filter(None, (x.strip() for x in m.group(1).split(","))):
+                a, _, b = r.partition("-")
+                free.append((int(a), int(b or a)))
+assert bsize and blocks, "dumpe2fs: no block size/count"
+free.sort()
+want = [(0, swap_off), (swap_off, 1 << 20)]   # RDB + DH0 + LBOOT, swap header
+pos = 0
+for a, b in free + [(blocks, blocks)]:
+    if a > pos:
+        want.append((root_off + pos * bsize, (a - pos) * bsize))
+    pos = max(pos, b + 1)
+MIB = 1 << 20
+merged = []
+for off, n in sorted(want):
+    lo, hi = off // MIB * MIB, min(-(-(off + n) // MIB) * MIB, disk_bytes)
+    if merged and lo <= merged[-1][1]:
+        merged[-1][1] = max(merged[-1][1], hi)
+    else:
+        merged.append([lo, hi])
+with open(out, "w") as f:
+    for lo, hi in merged:
+        f.write(f"{lo} {hi - lo}\n")
+total = sum(hi - lo for lo, hi in merged)
+print(f"  {len(merged)} ranges, {total >> 20} MiB of {disk_bytes >> 20} MiB "
+      f"(ext4: {sum(b - a + 1 for a, b in free) * bsize >> 20} MiB free, skipped)")
+PYEOF
 rdbtool -r "$W/disk.img" info
-rm -f "$W/dh0.hdf" "$W/lboot.hdf" "$W/swap.img" "$W/root.img"
+rm -f "$W/dh0.hdf" "$W/lboot.hdf" "$W/swap.img" "$W/root.img" "$W/dumpe2fs.txt"
 
 # ---------------------------------------------------------------- output
-log "Compressing image"
-IMG=$OUT/warp-cf-${CF_BLOCKS}.img.gz
-gzip -1 -c "$W/disk.img" > "$IMG.part"
-mv "$IMG.part" "$IMG"
+# Stored sparse: the data extents of disk.img ("offset length", what
+# SEEK_DATA/SEEK_HOLE report) and their bytes gzipped one after the other;
+# everything else is zero.  cfcard/write-image.py writes it to a card.
+log "Image data"
+rm -f "$OUT/warp-cf-${CF_BLOCKS}.img.gz" "$OUT/warp-cf-${CF_BLOCKS}.img.gz".*   # older format
+python3 - "$W/disk.img" "$BASE.extents.part" <<'PYEOF' | gzip -1 > "$BASE.data.gz.part"
+import os, sys
+src, ext = sys.argv[1:]
+fd = os.open(src, os.O_RDONLY)
+size = os.fstat(fd).st_size
+out = sys.stdout.buffer
+pos = total = 0
+with open(ext, "w") as e:
+    while pos < size:
+        try:
+            start = os.lseek(fd, pos, os.SEEK_DATA)
+        except OSError:          # ENXIO: only a hole is left
+            break
+        end = os.lseek(fd, start, os.SEEK_HOLE)
+        e.write(f"{start} {end - start}\n")
+        n = end - start
+        os.lseek(fd, start, os.SEEK_SET)
+        while n:
+            b = os.read(fd, min(n, 4 << 20))
+            out.write(b)
+            n -= len(b)
+        total += end - start
+        pos = end
+print(f"  {total >> 20} MiB of data in the {size >> 20} MiB image", file=sys.stderr)
+PYEOF
 {
     echo "CF_BLOCKS=$CF_BLOCKS"
     echo "IMAGE_BYTES=$(stat -c %s "$W/disk.img")"
     echo "CHS=$CYLS/$HEADS/$SECS"
+    echo "RDB_BYTES=$(( DH0_LO * CYL_BLOCKS * 512 ))"
+    echo "DH0_OFFSET=$(( DH0_LO * CYL_BLOCKS * 512 ))"
+    echo "DH0_BYTES=$DH0_BYTES"
     echo "BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "KERNEL=$(basename "$VMLINUX") $(stat -c %s "$VMLINUX") bytes"
     echo "ROOTFS=$ROOTFS_TAR"
-} > "$IMG.info"
+    echo "INPUTS=$INPUTS"
+} > "$BASE.info.part"
+cp "$W/ranges" "$BASE.ranges"
+mv "$BASE.extents.part" "$BASE.extents"
+mv "$BASE.data.gz.part" "$BASE.data.gz"
+mv "$BASE.info.part" "$BASE.info"     # last: the .info marks a complete image
 rm -f "$W/disk.img"
-log "Image: ${IMG#$REPO/} ($(du -h "$IMG" | cut -f1) compressed)"
+log "Image: ${BASE#$REPO/}.{data.gz,extents,ranges,info} ($(du -h "$BASE.data.gz" | cut -f1) compressed data)"

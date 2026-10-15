@@ -2,28 +2,37 @@
 # Prepare a Warp CF card from scratch on macOS: build the card image for the
 # card's exact size (in the build container), then write it to the card.
 #
-#   cfcard/make-cf.sh [--image-only] [--verify] disk39        (or /dev/disk39, /dev/rdisk39)
+#   cfcard/make-cf.sh [--image-only] [--used-only [--keep-dh0]] [--verify] disk39   (or /dev/disk39, /dev/rdisk39)
 #
 # Layout and options: see cfcard/mkimage.sh (DH0_MB, LBOOT_MB, SWAP_MB,
 # ROOT_DISK, VIDEO are passed through).  Needs ./build.sh all to have run.
-# Writing needs sudo and ERASES THE WHOLE CARD.
+# Writing needs sudo and ERASES THE WHOLE CARD.  --used-only writes just what
+# the new card needs (RDB, DH0, LBOOT, swap header, the blocks the ext4 root
+# uses) and leaves the rest of the card as it was: much faster on a big card.
+# --keep-dh0 also leaves the RDB and DH0 (AmigaOS) as they are on the card;
+# only if the card's partition layout is the new image's (cfcard/rdb-layout.py).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 image_only=0
 verify=0
+used_only=0
+keep_dh0=0
 disk=""
 
 for arg in "$@"; do
     case "$arg" in
         --image-only) image_only=1 ;;
         --verify) verify=1 ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        --used-only) used_only=1 ;;
+        --keep-dh0) keep_dh0=1 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         -*) echo "unknown option: $arg" >&2; exit 1 ;;
         *) disk=$arg ;;
     esac
 done
-[ -n "$disk" ] || { sed -n '2,10p' "$0"; exit 1; }
+[ -n "$disk" ] || { sed -n '2,14p' "$0"; exit 1; }
+[ "$keep_dh0" = 0 ] || [ "$used_only" = 1 ] || { echo "--keep-dh0 needs --used-only" >&2; exit 1; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -77,10 +86,14 @@ for f in "$repo/output/kernel/vmlinux"; do
     [ -f "$f" ] || die "missing $f - run ./build.sh all first"
 done
 CF_BLOCKS=$blocks "$repo/build.sh" cfimage
-img=$repo/output/cfcard/warp-cf-$blocks.img.gz
-[ -f "$img" ] || die "image not built: $img"
+# sparse image: .data.gz + .extents + .ranges + .info (see cfcard/write-image.py)
+img=$repo/output/cfcard/warp-cf-$blocks
+for f in "$img.info" "$img.data.gz" "$img.extents" "$img.ranges"; do
+    [ -f "$f" ] || die "image not built: $f missing"
+done
 img_bytes=$(sed -n 's/^IMAGE_BYTES=//p' "$img.info")
 [ "$img_bytes" -le "$size" ] || die "image ($img_bytes) larger than the card ($size)"
+writer=("$repo/cfcard/write-image.py")
 
 if [ "$image_only" = 1 ]; then
     echo "Image ready: ${img#$repo/} (not written, --image-only)"
@@ -94,31 +107,50 @@ echo "Current contents of /dev/$id:"
 diskutil list "/dev/$id" | sed 's/^/  /'
 echo
 echo "This ERASES the whole card /dev/$id (\"$media\", $((size / 1000000)) MB) and writes"
-echo "  ${img#$repo/}  ($img_bytes bytes)"
+skip=()
+if [ "$keep_dh0" = 1 ]; then
+    rdb_bytes=$(sed -n 's/^RDB_BYTES=//p' "$img.info")
+    dh0_off=$(sed -n 's/^DH0_OFFSET=//p' "$img.info")
+    dh0_bytes=$(sed -n 's/^DH0_BYTES=//p' "$img.info")
+    [ -n "$rdb_bytes" ] && [ -n "$dh0_off" ] && [ -n "$dh0_bytes" ] || die "$img.info has no RDB/DH0 layout (rebuild the image)"
+    sudo -v || die "sudo failed"
+    # Same partition layout (geometry, names, cylinders, DOS types; boot
+    # priority and flags may differ): DH0 on the card is where the image has
+    # it.  The card's RDB stays too, with whatever was changed there.
+    tmp=$(mktemp -d)
+    sudo dd if="/dev/r$id" of="$tmp/card.rdb" bs=$rdb_bytes count=1 2>/dev/null
+    python3 -I "${writer[@]}" --dump "0:$rdb_bytes" "$img" > "$tmp/image.rdb"
+    python3 -I "$repo/cfcard/rdb-layout.py" "$tmp/card.rdb" > "$tmp/card.txt" 2>&1 || true
+    python3 -I "$repo/cfcard/rdb-layout.py" "$tmp/image.rdb" > "$tmp/image.txt"
+    if ! diff -u "$tmp/card.txt" "$tmp/image.txt" | sed 's/^/  /'; then
+        rm -rf "$tmp"
+        die "the card's partition layout differs from the new image's - DH0 cannot be kept (drop --keep-dh0)"
+    fi
+    rm -rf "$tmp"
+    skip=(--skip "0:$((dh0_off + dh0_bytes))")
+    echo "The card's partition layout matches the image: its RDB and DH0 stay as they are."
+fi
+if [ "$used_only" = 1 ]; then
+    used=$(awk '{ s += $2 } END { print s }' "$img.ranges")
+    [ "$keep_dh0" = 1 ] && used=$((used - dh0_off - dh0_bytes))
+    echo "  ${img#$repo/}  (only the used parts: about $((used >> 20)) of $((img_bytes >> 20)) MiB)"
+else
+    echo "  ${img#$repo/}  ($img_bytes bytes)"
+fi
 read -r -p "Type the disk identifier ($id) to continue: " answer
 [ "$answer" = "$id" ] || die "not confirmed, nothing written"
 
 # ---- write
 sudo -v || die "sudo failed - run this script from a Terminal window so it can ask for the password"
 diskutil unmountDisk "/dev/$id" >/dev/null || die "cannot unmount /dev/$id"
-progress=""
-if dd if=/dev/zero of=/dev/null count=1 status=progress 2>/dev/null; then
-    progress="status=progress"
-fi
 echo "Writing (sudo) ..."
 start=$(date +%s)
-gzip -dc "$img" | sudo dd of="/dev/r$id" bs=4m $progress
+flags=()
+[ "$used_only" = 1 ] && flags+=(--used-only)
+[ "$verify" = 1 ] && flags+=(--verify)
+sudo /usr/bin/python3 -I "${writer[@]}" ${flags[@]+"${flags[@]}"} ${skip[@]+"${skip[@]}"} "$img" "/dev/r$id"
 sync
 echo "Written in $(( $(date +%s) - start )) s"
-
-if [ "$verify" = 1 ]; then
-    echo "Verifying ..."
-    if gzip -dc "$img" | sudo cmp -n "$img_bytes" - "/dev/r$id"; then
-        echo "Verify OK"
-    else
-        die "verify FAILED"
-    fi
-fi
 
 diskutil eject "/dev/$id" >/dev/null && echo "Card ejected."
 cat <<EOF
