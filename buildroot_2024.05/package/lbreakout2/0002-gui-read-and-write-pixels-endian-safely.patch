@@ -1,0 +1,111 @@
+From: Andrzej Rogozynski <sellen@cs-lab.eu>
+Subject: [PATCH] gui: read and write pixels endian-safely
+
+stk_surface_set_pixel(), stk_surface_get_pixel() and stk_surface_gray()
+memcpy BytesPerPixel bytes between the pixel and a Uint32.  That takes
+the low bytes of the Uint32 only on little-endian machines; on a
+big-endian one (m68k) a 16-bit get_pixel returns the value shifted up by
+16, and set_pixel writes the high bytes: create_shadow() wrote its white
+colour key as black, so every shadow (ball, paddle, bricks) was a full
+dark rectangle, and the grayed screens behind pause/help got wrong
+colours.  Read and write the pixel with a load/store of its own size.
+
+Upstream-Status: Pending
+Signed-off-by: Andrzej Rogozynski <sellen@cs-lab.eu>
+---
+--- a/gui/stk.c	2026-10-21 00:47:31
++++ b/gui/stk.c	2026-10-21 00:47:49
+@@ -854,21 +854,54 @@
+ already be in SDL format.
+ ====================================================================
+ */
++/*
++ * A pixel is a Uint32 holding the value in its low BytesPerPixel bytes
++ * (as SDL_MapRGB returns it).  Copying the first bytes of that Uint32 with
++ * memcpy only works on little-endian machines: on big-endian ones it takes
++ * the high bytes, so a 16-bit pixel came back shifted up by 16 and white
++ * was written as black.
++ */
++static Uint32 stk_pixel_read( const Uint8 *p, int bpp )
++{
++    switch ( bpp ) {
++        case 1: return *p;
++        case 2: return *(const Uint16 *)p;
++        case 3:
++#if SDL_BYTEORDER == SDL_BIG_ENDIAN
++            return p[0] << 16 | p[1] << 8 | p[2];
++#else
++            return p[0] | p[1] << 8 | p[2] << 16;
++#endif
++        default: return *(const Uint32 *)p;
++    }
++}
++static void stk_pixel_write( Uint8 *p, int bpp, Uint32 pixel )
++{
++    switch ( bpp ) {
++        case 1: *p = pixel; break;
++        case 2: *(Uint16 *)p = pixel; break;
++        case 3:
++#if SDL_BYTEORDER == SDL_BIG_ENDIAN
++            p[0] = pixel >> 16; p[1] = pixel >> 8; p[2] = pixel;
++#else
++            p[0] = pixel; p[1] = pixel >> 8; p[2] = pixel >> 16;
++#endif
++            break;
++        default: *(Uint32 *)p = pixel; break;
++    }
++}
+ void stk_surface_set_pixel( 
+     SDL_Surface *dest, int dx, int dy, Uint32 pixel )
+ {
+-    memcpy( dest->pixels + dy * dest->pitch + 
+-            dx * dest->format->BytesPerPixel,
+-            &pixel, dest->format->BytesPerPixel );
++    stk_pixel_write( (Uint8 *)dest->pixels + dy * dest->pitch + 
++                     dx * dest->format->BytesPerPixel,
++                     dest->format->BytesPerPixel, pixel );
+ }
+ Uint32 stk_surface_get_pixel( SDL_Surface *src, int sx, int sy )
+ {
+-    Uint32 pixel = 0;
+-    memcpy( &pixel, 
+-            src->pixels + sy * src->pitch + 
+-            sx * src->format->BytesPerPixel, 
+-            src->format->BytesPerPixel );
+-    return pixel;
++    return stk_pixel_read( (Uint8 *)src->pixels + sy * src->pitch + 
++                           sx * src->format->BytesPerPixel, 
++                           src->format->BytesPerPixel );
+ }
+  
+ /*
+@@ -893,12 +926,10 @@
+         for ( i = dx, x_offset = dx * dest->format->BytesPerPixel; 
+               i < dx + dw; 
+               i++, x_offset += dest->format->BytesPerPixel ) {
+-            pixel = 0;
+             /* get pixel */
+-            memcpy( &pixel,
+-                    dest->pixels +
+-                    y_offset + x_offset,
+-                    dest->format->BytesPerPixel );
++            pixel = stk_pixel_read( (Uint8 *)dest->pixels +
++                                    y_offset + x_offset,
++                                    dest->format->BytesPerPixel );
+             /* extract colors */
+             temp=pixel & dest->format->Rmask;
+             temp=temp>>dest->format->Rshift;
+@@ -916,10 +947,9 @@
+             gray = (red + green + green + blue) >> (2 + dark);
+             pixel = SDL_MapRGB( dest->format, gray, gray, gray );
+             /* replace */
+-            memcpy( dest->pixels +
+-                    y_offset + x_offset,
+-                    &pixel, 
+-                    dest->format->BytesPerPixel );
++            stk_pixel_write( (Uint8 *)dest->pixels +
++                             y_offset + x_offset,
++                             dest->format->BytesPerPixel, pixel );
+         }
+         y_offset += dest->pitch;
+     }
